@@ -1,0 +1,44 @@
+# MATLAB generated data / temporary files
+
+# Simulation / workspace data
+*.mat
+
+# MATLAB autosave / backup files
+*.asv
+*.autosave
+*.m~
+
+# MATLAB code generation / Simulink build artifacts
+slprj/
+codegen/
+work/
+*_grt_rtw/
+*_ert_rtw/
+*_slprj/
+
+# MEX binaries
+*.mexw64
+*.mexa64
+*.mexmaci64
+
+# MATLAB project / cache / temporary folders
+*.prj
+*.log
+*.tmp
+*.bak
+
+# Coverage / profiler / generated reports
+coverage/
+html/
+report/
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Keep source code and lightweight reports
+!*.m
+!*.txt
+!*.csv
+!*.md
