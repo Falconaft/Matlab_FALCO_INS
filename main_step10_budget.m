@@ -22,13 +22,17 @@ base_seed = 7000;
 % =====================================================================
 % Шаг 10.2: КОНФИГУРАЦИЯ (та же, что в main_step9_mc)
 % =====================================================================
-cfg.fnav       = 250;
+cfg.fnav       = 400;   % режим Шага B (2000/400 = 5, кратно)
 cfg.f_gnss     = 10;
 cfg.sigma_pos  = 1.5*ones(3,1);
 cfg.sigma_vel  = 0.05*ones(3,1);
 cfg.corrtime   = 1000;
 cfg.lever      = [0.1; 0.0; -0.1];
-cfg.diag_decim = 250;
+% Частота записи диагностики задаётся ЯВНО в герцах, прореживание
+% вычисляется из неё. Раньше стояло число 250, привязанное к f_nav=250
+% (250 тактов = 1 с); при смене частоты навигатора смысл менялся бы молча.
+cfg.f_diag     = 1;                                   % [Гц]
+cfg.diag_decim = round(cfg.fnav / cfg.f_diag);
 cfg.cep_target = 10;
 
 t_end         = truth.t(end);
@@ -52,6 +56,30 @@ prof = imu_profile_pulse40_updated();
 prof.cal_factor_gyro  = 0.003;   % гиро: остаток = in-run пол
 prof.cal_factor_accel = 0.25;    % акс.: полевая выставка ~60 угл.сек
 % Для сценария "без калибровки" поставь оба = 1.0
+
+% =====================================================================
+% ПРОВЕРКА ВРЕМЕННОЙ СЕТКИ (A1)
+% =====================================================================
+f_truth   = 1/truth.dt;
+ratio_raw = f_truth / cfg.fnav;
+step_chk  = round(ratio_raw);
+dt_nav    = step_chk * truth.dt;
+fnav_real = 1/dt_nav;
+fprintf('=== ПРОВЕРКА ВРЕМЕННОЙ СЕТКИ (A1) ===\n');
+fprintf('  запрошенная f_nav   : %10.4f Гц\n', cfg.fnav);
+fprintf('  f_truth             : %10.4f Гц\n', f_truth);
+fprintf('  ratio f_truth/f_nav : %10.6f\n',    ratio_raw);
+fprintf('  step (отсчётов/такт): %10d\n',      step_chk);
+fprintf('  dt_nav              : %10.6f с\n',  dt_nav);
+fprintf('  ФАКТИЧЕСКАЯ f_nav   : %10.4f Гц\n', fnav_real);
+fprintf('  ratio f_nav/f_gnss  : %10.4f\n',    cfg.fnav/cfg.f_gnss);
+if abs(ratio_raw - step_chk) > 1e-12
+    fprintf('  СТАТУС: НЕКРАТНЫЕ ЧАСТОТЫ — реально %.3f Гц вместо %.3f Гц!\n', ...
+            fnav_real, cfg.fnav);
+else
+    fprintf('  СТАТУС: OK — частоты кратны, f_nav точная\n');
+end
+fprintf('\n');
 
 fprintf('=== ШАГ 10: БЮДЖЕТ ОШИБОК ===\n');
 fprintf('Кандидат: %s\n', prof.name);
