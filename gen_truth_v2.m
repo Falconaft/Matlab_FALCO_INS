@@ -28,6 +28,9 @@ function truth = gen_truth_v2(p, c)
 %            .phase (N x 1) номер фазы
 %            .alt, .Vmag, .gamma, .Mach, .mass, .thrust - диагностика
 %            .dt, .r0, .Cen, .nb (индекс конца разгона)
+%            .C_e_ned0 (3x3) NED -> ECEF в точке старта
+%            .C_ned_e0 (3x3) ECEF -> NED в точке старта (= C_e_ned0')
+%            .ned (N x 3) позиция в NED относительно точки старта [м]
 
     dt = p.dt;
 
@@ -36,6 +39,10 @@ function truth = gen_truth_v2(p, c)
     % =====================================================================
     r0  = lla2ecef(deg2rad(p.lat0), deg2rad(p.lon0), p.h0, c);
     Cen = C_e_n(deg2rad(p.lat0), deg2rad(p.lon0));   % столбцы: E, N, U
+
+    % Матрица NED в точке старта. Конвенция та же, что у C_e_n:
+    % столбцы — орты [Север, Восток, Вниз] в ECEF, применение v_e = C * v_ned.
+    C_e_ned0 = C_e_ned(deg2rad(p.lat0), deg2rad(p.lon0));
 
     % Начальная скорость по азимуту и углу возвышения (в ENU, затем в ECEF)
     az = deg2rad(p.azimuth);
@@ -126,11 +133,23 @@ function truth = gen_truth_v2(p, c)
     truth.r0     = r0;
     truth.Cen    = Cen;
 
+    % --- NED-интерфейс (внутренний core остаётся ECEF) ---
+    truth.C_e_ned0 = C_e_ned0;        % NED -> ECEF
+    truth.C_ned_e0 = C_e_ned0';       % ECEF -> NED
+
     % Индекс конца работы двигателя (для диагностики)
     truth.nb = min(round(p.t_burn/dt) + 1, N);
 
     % Локальные ENU-координаты относительно точки старта
     truth.enu = (truth.R - r0') * Cen;
+
+    % Позиция в NED относительно точки старта. Величины хранятся ПОСТРОЧНО,
+    % поэтому преобразование — умножение справа на матрицу NED -> ECEF.
+    % Связь с ENU: ned = [N E -U], то есть
+    %   truth.ned(:,1) ==  truth.enu(:,2)
+    %   truth.ned(:,2) ==  truth.enu(:,1)
+    %   truth.ned(:,3) == -truth.enu(:,3)
+    truth.ned = (truth.R - r0') * C_e_ned0;
 end
 
 
