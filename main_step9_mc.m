@@ -81,7 +81,12 @@ fprintf('Реализаций: %d\n\n', N_mc);
 % =====================================================================
 % Шаг 9.3: ПРОГОН
 % =====================================================================
-mc = run_montecarlo_eskf(prof, imu, truth, c, cfg, N_mc, base_seed);
+% ВАЖНО: используется run_montecarlo_eskf2 (не v1). Только v2 вызывает
+% draw_gravity_anomaly, поэтому при вызове v1 параметры cfg.defl_vert_sigma
+% и cfg.grav_anom_sigma задавались, но НЕ ДЕЙСТВОВАЛИ — аномалия поля не
+% применялась вовсе. Профиль передаётся дважды (истина и настройка фильтра
+% совпадают); рассогласование профилей нужно только в бюджете ошибок.
+mc = run_montecarlo_eskf2(prof, prof, imu, truth, c, cfg, N_mc, base_seed);
 
 % =====================================================================
 % Шаг 9.4: РЕЗУЛЬТАТ
@@ -98,18 +103,32 @@ fprintf('  Расходившихся               : %8d\n', mc.n_fail);
 fprintf('%s\n', repmat('-',1,54));
 fprintf('  Оценка bias акс. (медиана)  : %7.1f %%\n', 100*mc.ba_frac_est);
 fprintf('  Систематика (ENU)           : [%+.2f %+.2f %+.2f] м\n', mc.bias_enu);
-fprintf('%s\n', repmat('=',1,54));
 
-fprintf('\nСРАВНЕНИЕ СО СТАРОЙ ТРАЕКТОРИЕЙ:\n');
-fprintf('  старая (|f|=0 на коасте):  КВО ~1.4-1.9 м\n');
-fprintf('  новая  (|f|=0.13..1.75g):  КВО  %.2f м\n', mc.cep);
-if mc.cep > 3
-    fprintf('  -> рост подтверждает: прежняя оценка была ЗАВЫШЕНА\n');
-    fprintf('     из-за ненаблюдаемости ориентации на «стерильной» баллистике\n');
-else
-    fprintf('  -> КВО сопоставим: лучшая наблюдаемость компенсирует\n');
-    fprintf('     проекцию ошибки ориентации в позицию\n');
+% --- Фактически разыгранные аномалии гравитационного поля ---
+if isfield(mc,'dg_info') && ~isempty(mc.dg_info)
+    defl_tot = [mc.dg_info.defl_total_arcsec]';
+    defl_E   = [mc.dg_info.defl_E_arcsec]';
+    defl_N   = [mc.dg_info.defl_N_arcsec]';
+    anom_v   = [mc.dg_info.anom_vert_mgal]';
+    dg_h     = [mc.dg_info.dg_horiz_mps2]';
+    dg_n     = [mc.dg_info.dg_norm_mps2]';
+    fprintf('%s\n', repmat('-',1,54));
+    fprintf('  РАЗЫГРАННАЯ АНОМАЛИЯ ПОЛЯ (задано: откл. отвеса %.1f", аном. %.0f мГал)\n', ...
+            cfg.defl_vert_sigma*206265, cfg.grav_anom_sigma*1e5);
+    fprintf('    уклонение отвеса, полное : медиана %6.2f", СКО %6.2f", макс %6.2f"\n', ...
+            median(defl_tot), std(defl_tot), max(defl_tot));
+    fprintf('      по Востоку             : среднее %+6.2f", СКО %6.2f"\n', ...
+            mean(defl_E), std(defl_E));
+    fprintf('      по Северу              : среднее %+6.2f", СКО %6.2f"\n', ...
+            mean(defl_N), std(defl_N));
+    fprintf('    аномалия вертикали       : среднее %+7.2f мГал, СКО %6.2f мГал\n', ...
+            mean(anom_v), std(anom_v));
+    fprintf('    |dg| горизонтальная      : медиана %.3e м/с²\n', median(dg_h));
+    fprintf('    |dg| полная              : медиана %.3e м/с²\n', median(dg_n));
+    fprintf('    ожидаемый вклад за коаст : %.2f м (0.5*|dg_гор|*T^2, T=%.0f с)\n', ...
+            0.5*median(dg_h)*p.coast_duration^2, p.coast_duration);
 end
+fprintf('%s\n', repmat('=',1,54));
 
 plot_montecarlo_cep(mc, cep_target);
 save('falco_step9_mc.mat', 'mc', 'cfg', 'prof', 'N_mc', 'base_seed');

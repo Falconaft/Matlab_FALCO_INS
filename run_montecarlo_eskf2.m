@@ -30,6 +30,20 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
 %   Выход:
 %     mc - статистика (та же структура, что у run_montecarlo_eskf)
 
+    % =====================================================================
+    % ОТДЕЛЬНЫЙ ПОТОК ДЛЯ АНОМАЛИИ ГРАВИТАЦИИ
+    % =====================================================================
+    % Аномалия разыгрывается из СВОЕГО потока, а не из того, где берутся
+    % ошибки IMU и выставка. Зачем:
+    %   - реализация поля воспроизводима независимо от модели датчика;
+    %   - изменение числа обращений к randn в imu_draw_errors/add_imu_errors
+    %     НЕ сдвигает разыгранную аномалию;
+    %   - B2 можно независимо включать и выключать в бюджете ошибок,
+    %     не меняя прочие реализации.
+    % Смещение выбрано заведомо большим числа реализаций любой кампании,
+    % чтобы потоки seed_i и seed_i+OFFSET не пересеклись.
+    GRAV_SEED_OFFSET = 100000;
+
     err_horiz  = zeros(N_mc,1);
     err_3d     = zeros(N_mc,1);
     err_enu    = zeros(N_mc,3);
@@ -37,6 +51,12 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     ba_true    = zeros(N_mc,1);
     align_used = zeros(N_mc,3);
     n_fail     = 0;
+
+    % Диагностика фактически разыгранных аномалий поля
+    dg_info = struct('defl_E_arcsec',cell(N_mc,1), 'defl_N_arcsec',[], ...
+                     'defl_total_arcsec',[], 'anom_vert_mgal',[], ...
+                     'dg_horiz_mps2',[], 'dg_norm_mps2',[]);
+    dg_vec  = zeros(N_mc,3);
 
     for i = 1:N_mc
         seed_i = base_seed + i;
@@ -51,9 +71,13 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
         cfg_i.align_err = cfg.align_sigma(:) .* randn(rng_imu, 3, 1);
         cfg_i.seed      = seed_i;
 
-        % Аномалия гравитации: своя на каждой реализации, иначе она стала бы
-        % детерминированной и дала бы ложную систематику по ансамблю.
-        cfg_i.dg_model = draw_gravity_anomaly(cfg, truth.Cen, rng_imu);
+        % Аномалия гравитации: своя на каждой реализации (иначе она стала бы
+        % детерминированной и дала бы ложную систематику по ансамблю) и из
+        % ОТДЕЛЬНОГО потока (см. пояснение к GRAV_SEED_OFFSET выше).
+        rng_grav = RandStream('mt19937ar','Seed', seed_i + GRAV_SEED_OFFSET);
+        [cfg_i.dg_model, info_i] = draw_gravity_anomaly(cfg, truth.Cen, rng_grav);
+        dg_info(i) = info_i;
+        dg_vec(i,:) = cfg_i.dg_model';
 
         % --- Прогон фильтра, настроенного по профилю ФИЛЬТРА ---
         res = eskf_run(imu_meas, truth, c, prof_filter, cfg_i);
@@ -91,6 +115,11 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
         mc.frac_pass = NaN;
     end
     mc.bias_enu   = mean(err_enu(ok,:), 1);
+
+    % --- Диагностика аномалии гравитации ---
+    mc.dg_info = dg_info;
+    mc.dg_vec  = dg_vec;
+    mc.grav_seed_offset = GRAV_SEED_OFFSET;
 
     ok_b = ~isnan(ba_resid) & (ba_true > 0);
     if any(ok_b)
