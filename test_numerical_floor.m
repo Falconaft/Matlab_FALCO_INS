@@ -103,10 +103,39 @@ e_ideal   = imu_draw_errors(prof_ideal, rng_ideal);
 imu_ideal_meas = add_imu_errors(imu, prof_ideal, e_ideal, rng_ideal);
 
 fprintf('\n=== ПРОВЕРКА ИДЕАЛЬНОСТИ ИЗМЕРЕНИЙ ===\n');
-d_f = max(vecnorm(imu_ideal_meas.fb    - imu.fb,    2, 2));
-d_w = max(vecnorm(imu_ideal_meas.wib_b - imu.wib_b, 2, 2));
-fprintf('  макс |f_изм - f_ист|      = %.3e м/с²  (ожидаем ~0)\n', d_f);
-fprintf('  макс |w_изм - w_ист|      = %.3e рад/с (ожидаем ~0)\n', d_w);
+
+% ВАЖНО о том, что считать "идеальным" измерением гироскопа.
+% zero_all_imu_errors обнуляет ОШИБКУ КАЛИБРОВКИ g-чувствительности
+% (g_sens_cal_sigma), но САМ КОЭФФИЦИЕНТ g_sensitivity остаётся —
+% это сделано намеренно, чтобы тракт его компенсации в механизации
+% участвовал в измеряемом численном поле.
+%
+% Следовательно идеальное показание гироскопа равно НЕ истинной угловой
+% скорости, а
+%       w_изм = w_ист + Gg_nom * f_ист
+% Прежняя формулировка проверки ("ожидаем ~0") сравнивала сырое измерение
+% с истиной и потому всегда показывала остаток Gg*|f|_max (при Gg = 10 °/ч/g
+% и пике 17.37 g это 8.42e-4 рад/с). Это не дефект модели, а неверно
+% поставленный тест.
+%
+% Ниже печатается И сырая разность (для наглядности), И правильный
+% остаток после вычитания ожидаемого детерминированного члена.
+
+d_f = max(vecnorm(imu_ideal_meas.fb - imu.fb, 2, 2));
+
+Gg_nom_chk  = prof_ideal.gyro.g_sensitivity * eye(3);
+dw_expected = (Gg_nom_chk * imu.fb')';                  % N x 3, ожидаемый вклад
+dw_actual   = imu_ideal_meas.wib_b - imu.wib_b;         % N x 3, фактическая разность
+
+d_w_raw   = max(vecnorm(dw_actual, 2, 2));
+d_w_resid = max(vecnorm(dw_actual - dw_expected, 2, 2));
+gg_peak   = max(vecnorm(dw_expected, 2, 2));
+
+fprintf('  макс |f_изм - f_ист|          = %.3e м/с²  (ожидаем ~0)\n', d_f);
+fprintf('  макс |w_изм - w_ист| (сырое)  = %.3e рад/с\n', d_w_raw);
+fprintf('    из них ожидаемая g-чувств.  = %.3e рад/с (Gg*|f|_max)\n', gg_peak);
+fprintf('  ОСТАТОК после вычитания Gg*f  = %.3e рад/с  [%s]\n', d_w_resid, ...
+        pass_str(d_w_resid < 1e-12));
 fprintf('  turn-on bias гиро/акс     = %.3e / %.3e\n', ...
         norm(e_ideal.gyro_turnon_bias), norm(e_ideal.accel_turnon_bias));
 
