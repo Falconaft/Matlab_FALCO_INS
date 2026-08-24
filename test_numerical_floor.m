@@ -53,14 +53,13 @@ load('falco_step7.mat', 'truth', 'imu', 'c', 'p');
 %   250 Гц — воспроизводит режим BASELINE_250; при сетке 2000 Гц отношение
 %            2000/250 = 8 тоже целое, поэтому этим значением можно отделить
 %            влияние более мелкой сетки истины от влияния самой частоты.
-cfg.fnav       = 400;              % частота навигатора [Гц]
-cfg.f_gnss     = 10;               % частота GNSS [Гц]
-cfg.sigma_pos  = 5*ones(3,1);      % СКО шума позиции GNSS [м]
-cfg.sigma_vel  = 0.1*ones(3,1);    % СКО шума скорости GNSS [м/с]
-cfg.corrtime   = 1000;             % время корреляции Гаусса-Маркова [с]
-cfg.lever      = [0.1; 0.0; -0.1]; % плечо антенны GNSS от IMU в body [м]
-cfg.seed       = 3000;
-cfg.f_diag     = 250;              % частота записи диагностики [Гц]
+% Базовая конфигурация; ниже — специфика теста.
+cfg = falco_config();
+cfg.seed   = 3000;
+cfg.f_diag = 250;                  % частота записи диагностики [Гц]
+% ПРИМЕЧАНИЕ: diag_decim здесь НЕ пересчитывается специально — ниже, при
+% формировании идеальных копий, он принудительно ставится в 1, чтобы
+% диагностика писалась на каждом такте и максимумы не терялись.
 
 t_end         = truth.t(end);
 t_coast_start = t_end - p.coast_duration;
@@ -81,6 +80,13 @@ prof = imu_profile_pulse40_updated();
 print_time_grid(truth, cfg.fnav, cfg.f_gnss);
 
 % =====================================================================
+% Шаг T.2b: РЕГРЕССИОННЫЕ ПРОВЕРКИ NED-ИНТЕРФЕЙСА
+% =====================================================================
+% Проверки вынесены сюда намеренно: C_e_ned вызывается в циклах, поэтому
+% контроль ортогональности внутри неё был бы лишней работой на каждом шаге.
+run_ned_checks(truth);
+
+% =====================================================================
 % Шаг T.3: ПОДГОТОВКА ИДЕАЛЬНЫХ КОПИЙ
 % =====================================================================
 % ВАЖНО: работаем ТОЛЬКО с копиями; рабочие prof и cfg остаются нетронутыми.
@@ -97,10 +103,39 @@ e_ideal   = imu_draw_errors(prof_ideal, rng_ideal);
 imu_ideal_meas = add_imu_errors(imu, prof_ideal, e_ideal, rng_ideal);
 
 fprintf('\n=== ПРОВЕРКА ИДЕАЛЬНОСТИ ИЗМЕРЕНИЙ ===\n');
-d_f = max(vecnorm(imu_ideal_meas.fb    - imu.fb,    2, 2));
-d_w = max(vecnorm(imu_ideal_meas.wib_b - imu.wib_b, 2, 2));
-fprintf('  макс |f_изм - f_ист|      = %.3e м/с²  (ожидаем ~0)\n', d_f);
-fprintf('  макс |w_изм - w_ист|      = %.3e рад/с (ожидаем ~0)\n', d_w);
+
+% ВАЖНО о том, что считать "идеальным" измерением гироскопа.
+% zero_all_imu_errors обнуляет ОШИБКУ КАЛИБРОВКИ g-чувствительности
+% (g_sens_cal_sigma), но САМ КОЭФФИЦИЕНТ g_sensitivity остаётся —
+% это сделано намеренно, чтобы тракт его компенсации в механизации
+% участвовал в измеряемом численном поле.
+%
+% Следовательно идеальное показание гироскопа равно НЕ истинной угловой
+% скорости, а
+%       w_изм = w_ист + Gg_nom * f_ист
+% Прежняя формулировка проверки ("ожидаем ~0") сравнивала сырое измерение
+% с истиной и потому всегда показывала остаток Gg*|f|_max (при Gg = 10 °/ч/g
+% и пике 17.37 g это 8.42e-4 рад/с). Это не дефект модели, а неверно
+% поставленный тест.
+%
+% Ниже печатается И сырая разность (для наглядности), И правильный
+% остаток после вычитания ожидаемого детерминированного члена.
+
+d_f = max(vecnorm(imu_ideal_meas.fb - imu.fb, 2, 2));
+
+Gg_nom_chk  = prof_ideal.gyro.g_sensitivity * eye(3);
+dw_expected = (Gg_nom_chk * imu.fb')';                  % N x 3, ожидаемый вклад
+dw_actual   = imu_ideal_meas.wib_b - imu.wib_b;         % N x 3, фактическая разность
+
+d_w_raw   = max(vecnorm(dw_actual, 2, 2));
+d_w_resid = max(vecnorm(dw_actual - dw_expected, 2, 2));
+gg_peak   = max(vecnorm(dw_expected, 2, 2));
+
+fprintf('  макс |f_изм - f_ист|          = %.3e м/с²  (ожидаем ~0)\n', d_f);
+fprintf('  макс |w_изм - w_ист| (сырое)  = %.3e рад/с\n', d_w_raw);
+fprintf('    из них ожидаемая g-чувств.  = %.3e рад/с (Gg*|f|_max)\n', gg_peak);
+fprintf('  ОСТАТОК после вычитания Gg*f  = %.3e рад/с  [%s]\n', d_w_resid, ...
+        pass_str(d_w_resid < 1e-12));
 fprintf('  turn-on bias гиро/акс     = %.3e / %.3e\n', ...
         norm(e_ideal.gyro_turnon_bias), norm(e_ideal.accel_turnon_bias));
 
@@ -307,4 +342,56 @@ function print_time_grid(truth, fnav, f_gnss)
         fprintf('  ВНИМАНИЕ: f_nav/f_gnss не целое — такты GNSS не попадают\n');
         fprintf('            точно в такты навигатора.\n');
     end
+end
+
+
+function run_ned_checks(truth)
+%RUN_NED_CHECKS  Регрессионные проверки NED-интерфейса.
+%
+%   Конвенция проекта:  v_e = C_e_ned * v_ned, то есть C_e_ned — матрица
+%   NED -> ECEF, её столбцы суть орты [Север, Восток, Вниз] в ECEF.
+%   Для величин, хранящихся ПОСТРОЧНО: ned_rows = ecef_rows * C_e_ned.
+
+    fprintf('\n=== РЕГРЕССИОННЫЕ ПРОВЕРКИ NED ===\n');
+
+    if ~isfield(truth,'C_e_ned0')
+        fprintf('  truth.C_e_ned0 отсутствует (старый .mat) — проверки пропущены.\n');
+        fprintf('  Перегенерируй falco_step7.mat через main_step7.\n');
+        return;
+    end
+
+    C  = truth.C_e_ned0;
+    Ct = truth.C_ned_e0;
+
+    e_orth = norm(C'*C - eye(3));
+    d_det  = det(C);
+    e_tr   = norm(Ct - C');
+
+    fprintf('  ||C_e_ned0''*C_e_ned0 - I|| = %.3e   [%s]\n', e_orth, ...
+            pass_str(e_orth < 1e-12));
+    fprintf('  det(C_e_ned0)              = %+.12f  [%s]\n', d_det, ...
+            pass_str(abs(d_det - 1) < 1e-12));
+    fprintf('  ||C_ned_e0 - C_e_ned0''||   = %.3e   [%s]\n', e_tr, ...
+            pass_str(e_tr < 1e-15));
+
+    if isfield(truth,'ned')
+        e_start = norm(truth.ned(1,:));
+        fprintf('  truth.ned(1,:)             = [%.3e %.3e %.3e]  [%s]\n', ...
+                truth.ned(1,:), pass_str(e_start < 1e-6));
+        if isfield(truth,'enu')
+            % Связь: ned = [N E -U]
+            e1 = max(abs(truth.ned(:,1) - truth.enu(:,2)));
+            e2 = max(abs(truth.ned(:,2) - truth.enu(:,1)));
+            e3 = max(abs(truth.ned(:,3) + truth.enu(:,3)));
+            fprintf('  max|ned(:,1) - enu(:,2)|   = %.3e   [%s]\n', e1, pass_str(e1 < 1e-9));
+            fprintf('  max|ned(:,2) - enu(:,1)|   = %.3e   [%s]\n', e2, pass_str(e2 < 1e-9));
+            fprintf('  max|ned(:,3) + enu(:,3)|   = %.3e   [%s]\n', e3, pass_str(e3 < 1e-9));
+        end
+    end
+end
+
+
+function s = pass_str(ok)
+%PASS_STR  Метка результата проверки.
+    if ok, s = 'OK'; else, s = 'FAIL'; end
 end

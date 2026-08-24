@@ -13,7 +13,13 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
 %
 %   Вход:
 %     imu_meas - ЗАШУМЛЁННЫЕ показания IMU (.t, .fb, .wib_b, .Ceb)
+%                ОБЯЗАТЕЛЬНО .w_eb_b — истинная угловая скорость тела
+%                относительно ECEF (служебная кинематика истины, НЕ измерение).
+%                Нужна для синтеза истинной скорости GNSS-антенны. Проброс
+%                выполняет add_imu_errors из attitude_program.
 %     truth    - истинная траектория (.t, .R, .V, .dt, .r0, .Cen)
+%                опционально .C_e_ned0 (NED -> ECEF). Если поля нет (старые
+%                .mat), матрица выводится из .Cen перестановкой столбцов.
 %     c        - константы
 %     prof     - профиль IMU (для Qc и начальной ковариации)
 %     cfg      - конфигурация прогона (см. main_step5.m)
@@ -29,6 +35,15 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     if ~isfield(cfg,'lever')      || isempty(cfg.lever),      cfg.lever = zeros(3,1); end
     if ~isfield(cfg,'diag_decim') || isempty(cfg.diag_decim), cfg.diag_decim = 25;    end
     rng_gnss = RandStream('mt19937ar','Seed', cfg.seed);
+
+    % Проверка наличия служебной истинной кинематики. Fallback на зашумлённый
+    % imu_meas.wib_b СОЗНАТЕЛЬНО не делается: истина не должна строиться из
+    % показаний датчика. Отсутствие поля означает устаревший pipeline.
+    assert(isfield(imu_meas, 'w_eb_b'), 'eskf_run:missingWebB', ...
+        ['imu_meas.w_eb_b отсутствует. Это истинная угловая скорость тела\n' ...
+         'относительно ECEF, нужная для синтеза скорости GNSS-антенны.\n' ...
+         'Поле формируется в attitude_program и пробрасывается в\n' ...
+         'add_imu_errors. Перегенерируй измерения актуальной версией.']);
 
     % =====================================================================
     % Шаг 5.11.2: ИНИЦИАЛИЗАЦИЯ номинального состояния (с ошибкой выставки)
@@ -90,6 +105,8 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     d_sr   = zeros(n_diag,3);   d_sv    = zeros(n_diag,3);   d_sp    = zeros(n_diag,3);
     d_ba   = zeros(n_diag,3);   d_bg    = zeros(n_diag,3);
     d_sba  = zeros(n_diag,3);   d_sbg   = zeros(n_diag,3);
+    % Абсолютная навигационная траектория (не ошибка, а само решение)
+    d_rnav = zeros(n_diag,3);   d_vnav  = zeros(n_diag,3);
     id = 0;
 
     % ОТДЕЛЬНЫЙ лог невязок GNSS (пишется В МОМЕНТ обновления, не по прореживанию!)
@@ -124,14 +141,30 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
         gnss_used = false;
         if tk >= t_next_gnss
             if gnss_available(tk, cfg.outage)
-                % Синтез измерения GNSS: истина + шум
-                r_gnss = truth.R(b,:)' + cfg.sigma_pos .* randn(rng_gnss,3,1);
-                v_gnss = truth.V(b,:)' + cfg.sigma_vel .* randn(rng_gnss,3,1);
+                % ---- ИСТИННЫЕ позиция и скорость АНТЕННЫ ----
+                % Измерение и предсказание ОБЯЗАНЫ относиться к одной
+                % физической точке. Раньше измерение строилось в точке IMU,
+                % а предсказание — в точке антенны, что давало систематику
+                % порядка |lever| (наблюдалось 0.155 м при |lever| = 0.141 м).
+                C_true_b   = imu_meas.Ceb(:,:,b);          % истинная ориентация
+                w_eb_true  = imu_meas.w_eb_b(b,:)';        % истинная w отн. ECEF
+                r_ant_true = truth.R(b,:)' + C_true_b * cfg.lever;
+                v_ant_true = truth.V(b,:)' ...
+                             + C_true_b * cross(w_eb_true, cfg.lever);
 
-                % Позиция/скорость АНТЕННЫ по оценке навигатора (учёт плеча)
+                % Синтез измерения GNSS: истина АНТЕННЫ + шум
+                r_gnss = r_ant_true + cfg.sigma_pos .* randn(rng_gnss,3,1);
+                v_gnss = v_ant_true + cfg.sigma_vel .* randn(rng_gnss,3,1);
+
+                % ---- Предсказание: позиция/скорость АНТЕННЫ по оценке ----
+                % Земной член входит со знаком МИНУС:
+                %   v_ant = v + C(w_ib x l) - [w_ie x](C l),
+                % так как w_eb^b = w_ib^b - C'*w_ie и
+                %   C*((C'w_ie) x l) = (C C' w_ie) x (C l) = w_ie x (C l).
+                % Ранее стоял плюс; расхождение 2*|w_ie x C*l| ~ 2e-5 м/с.
                 r_ant_hat = nav.r + nav.C * cfg.lever;
                 v_ant_hat = nav.v + nav.C * cross(aux.w_b, cfg.lever) ...
-                                  + skew(c.WIE) * (nav.C * cfg.lever);
+                                  - skew(c.WIE) * (nav.C * cfg.lever);
 
                 % НЕВЯЗКА: ИЗМЕРЕНИЕ минус оценка (конвенция Sola)
                 z = [r_gnss - r_ant_hat; v_gnss - v_ant_hat];
@@ -163,6 +196,8 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
             d_sr(id,:)  = sP(1:3)';    d_sv(id,:)  = sP(4:6)';    d_sp(id,:) = sP(7:9)';
             d_bg(id,:)  = nav.bg';     d_ba(id,:)  = nav.ba';
             d_sbg(id,:) = sP(10:12)';  d_sba(id,:) = sP(13:15)';
+            % Абсолютное навигационное решение в ECEF
+            d_rnav(id,:) = nav.r';     d_vnav(id,:) = nav.v';
         end
     end
 
@@ -175,6 +210,11 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     res.sig_r  = d_sr(idx,:);     res.sig_v = d_sv(idx,:);    res.sig_p = d_sp(idx,:);
     res.bg_est = d_bg(idx,:);     res.ba_est= d_ba(idx,:);
     res.sig_bg = d_sbg(idx,:);    res.sig_ba= d_sba(idx,:);
+
+    % Абсолютная навигационная траектория (ECEF). Логируется всегда:
+    % нужна для построения truth vs nav и для внешнего NED-интерфейса.
+    res.r_nav  = d_rnav(idx,:);
+    res.v_nav  = d_vnav(idx,:);
 
     % Невязки GNSS - в отдельных полях со своей временной шкалой
     gidx           = 1:ig;
@@ -193,6 +233,20 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
 
     % Ошибка в локальной ENU (для КВО)
     res.dr_enu   = res.dr * truth.Cen;
+
+    % --- Ошибка в NED (внешний интерфейс; core остаётся ECEF) ---
+    % Величины хранятся построчно, поэтому умножаем справа на NED -> ECEF.
+    % Обратная совместимость: если truth сгенерирована старой версией и поля
+    % C_e_ned0 нет, выводим матрицу из Cen перестановкой столбцов
+    % (ned = [N E -U]); численно это тождественно прямому построению.
+    if isfield(truth, 'C_e_ned0')
+        C_e_ned0 = truth.C_e_ned0;
+    else
+        C_e_ned0 = [truth.Cen(:,2), truth.Cen(:,1), -truth.Cen(:,3)];
+    end
+    res.C_e_ned0 = C_e_ned0;
+    res.dr_ned   = res.dr * C_e_ned0;
+    res.dv_ned   = res.dv * C_e_ned0;
     res.err_horiz_final = hypot(res.dr_enu(end,1), res.dr_enu(end,2));
     res.err_3d_final    = norm(res.dr(end,:));
 end

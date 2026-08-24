@@ -134,6 +134,15 @@ function imu_noisy = add_imu_errors(imu_ideal, profile, e, rng_stream)
     imu_noisy.wib_b  = wib_n;
     imu_noisy.Ceb    = imu_ideal.Ceb;
     imu_noisy.Gg_nom = Gg_nom;      % передаём в механизацию для компенсации
+
+    % СЛУЖЕБНАЯ ИСТИННАЯ КИНЕМАТИКА (не показание датчика!).
+    % w_eb_b — истинная угловая скорость тела относительно ECEF, сформированная
+    % в attitude_program. Пробрасывается БЕЗ ИЗМЕНЕНИЙ и БЕЗ ЗАШУМЛЕНИЯ,
+    % поскольку нужна для синтеза ИСТИННОЙ скорости GNSS-антенны:
+    %     v_ant_true = v_IMU_true + C_true*(w_eb_true x lever)
+    % Загрязнять её ошибками гироскопа нельзя: это часть ИСТИНЫ, а не
+    % измерение. Механизация и фильтр это поле не используют.
+    imu_noisy.w_eb_b = imu_ideal.w_eb_b;
 end
 
 
