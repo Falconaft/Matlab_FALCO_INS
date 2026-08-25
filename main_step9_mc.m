@@ -8,7 +8,7 @@ load('falco_step7.mat', 'truth', 'imu', 'c', 'p');
 % =====================================================================
 % Шаг 9.1: ПАРАМЕТРЫ КАМПАНИИ
 % =====================================================================
-N_mc       = 25;         %  20, потом 200-250
+N_mc       = 10;        % финальная кампания
 base_seed  = 3001;
 cep_target = 10;
 
@@ -30,6 +30,17 @@ cfg.cep_target = cep_target;
 % 5 угл.сек равнина, 15 холмистая местность, 30 горы.
 cfg.defl_vert_sigma = 10 / 206265;      % [рад] СКО уклонения отвеса
 cfg.grav_anom_sigma = 50e-5;            % [м/с²] СКО аномалии (50 мГал)
+
+% --- B4: НЕКОМПЕНСИРОВАННОЕ РАССОГЛАСОВАНИЕ ЭПОХ GNSS/ИНС ---
+% Измерение относится к t_meas = t_nav - offset, но фильтр обрабатывает
+% его как текущее. Компенсация НЕ вводится — это часть базовой модели.
+%
+% Значение 2 мс выбрано как реалистичная верхняя граница для системы
+% БЕЗ аппаратной синхронизации по PPS. По парному МК (test_b2b4_paired_mc)
+% вклад составляет +0.75 м, то есть ~17% бюджета КВО; при 5 мс R95 уже
+% выходит за целевые 10 м.
+cfg.gnss_time_offset_enable = true;
+cfg.gnss_time_offset        = 2e-3;     % [с]
 
 t_end         = truth.t(end);
 t_coast_start = t_end - p.coast_duration;
@@ -68,12 +79,30 @@ else
 end
 fprintf('\n');
 
-fprintf('=== ШАГ 9: МОНТЕ-КАРЛО НА РЕАЛИСТИЧНОЙ ТРАЕКТОРИИ ===\n');
+fprintf('=== ШАГ 9: ФИНАЛЬНАЯ КАМПАНИЯ МОНТЕ-КАРЛО ===\n');
+fprintf('%s\n', repmat('*',1,62));
+fprintf('*  BASELINE: B2 (аномалия гравитации) + B4 (сдвиг GNSS %.1f мс)  *\n', ...
+        cfg.gnss_time_offset*1e3);
+fprintf('*  Компенсация сдвига НЕ вводится — это часть модели.           *\n');
+fprintf('%s\n', repmat('*',1,62));
 fprintf('Кандидат: %s\n', prof.name);
 fprintf('Траектория: %.1f с, коаст %.1f с, окно GNSS %.1f с\n', ...
         t_end, p.coast_duration, t_coast_start - p.outage_boost_end);
 fprintf('Выставка (СКО): курс %.1f мрад\n', cfg.align_sigma(3)*1e3);
-fprintf('Реализаций: %d\n\n', N_mc);
+fprintf('Реализаций: %d\n', N_mc);
+fprintf('%s\n', repmat('-',1,62));
+fprintf('СОСТАВ BASELINE:\n');
+fprintf('  B2 аномалия поля : уклонение отвеса %.1f", аномалия %.0f мГал\n', ...
+        cfg.defl_vert_sigma*206265, cfg.grav_anom_sigma*1e5);
+fprintf('  B4 сдвиг GNSS    : %.1f мс (%s)\n', cfg.gnss_time_offset*1e3, ...
+        ternary_str(cfg.gnss_time_offset_enable,'ВКЛЮЧЕН','выключен'));
+fprintf('  плечо антенны    : [%.2f %.2f %.2f] м\n', cfg.lever);
+fprintf('  шум GNSS         : %.1f м / %.2f м/с при %.0f Гц\n', ...
+        cfg.sigma_pos(1), cfg.sigma_vel(1), cfg.f_gnss);
+fprintf('  калибровка IMU   : гиро %.3f, акс. %.3f\n', ...
+        get_or(prof,'cal_factor_gyro',get_or(prof,'cal_factor',1)), ...
+        get_or(prof,'cal_factor_accel',get_or(prof,'cal_factor',1)));
+fprintf('%s\n\n', repmat('-',1,62));
 
 % =====================================================================
 % Шаг 9.3: ПРОГОН
@@ -88,45 +117,61 @@ mc = run_montecarlo_eskf2(prof, prof, imu, truth, c, cfg, N_mc, base_seed);
 % =====================================================================
 % Шаг 9.4: РЕЗУЛЬТАТ
 % =====================================================================
-fprintf('\n=== РЕЗУЛЬТАТ: %s (реалистичная траектория) ===\n', mc.prof_name);
+fprintf('\n=== РЕЗУЛЬТАТ: %s ===\n', mc.prof_name);
+fprintf('    BASELINE = B2 + B4(%.1f мс), N = %d\n', ...
+        cfg.gnss_time_offset*1e3, N_mc);
 fprintf('%s\n', repmat('=',1,54));
-fprintf('  КВО (медиана)               : %8.2f м\n', mc.cep);
-fprintf('  Среднее                     : %8.2f м\n', mc.mean_horiz);
-fprintf('  СКО                         : %8.2f м\n', mc.std_horiz);
+fprintf('  КВО50 (медиана)             : %8.2f м\n', mc.cep);
 fprintf('  R95                         : %8.2f м\n', mc.r95);
-fprintf('  Худший прогон               : %8.2f м\n', mc.max_horiz);
 fprintf('  Уложилось в %2.0f м            : %7.1f %%\n', cep_target, 100*mc.frac_pass);
-fprintf('  Расходившихся               : %8d\n', mc.n_fail);
 fprintf('%s\n', repmat('-',1,54));
-fprintf('  Оценка bias акс. (медиана)  : %7.1f %%\n', 100*mc.ba_frac_est);
 fprintf('  Систематика (ENU)           : [%+.2f %+.2f %+.2f] м\n', mc.bias_enu);
+fprintf('%s\n', repmat('-',1,54));
+% КАЧЕСТВО ОЦЕНКИ BIAS — пара (истинное полное смещение, остаток оценки)
+% в момент перед коастом. Процент "сколько выучено" НЕ выводится: при
+% малом истинном смещении отношение неустойчиво (наблюдались -536%).
+g0  = 9.80665;
+deg = pi/180;
+fprintf('  BIAS ПЕРЕД КОАСТОМ (истинное полное / остаток оценки):\n');
+fprintf('    акселерометр : %7.3f / %7.3f мг\n', ...
+        mc.ba_true_pre_med/g0*1e3, mc.ba_resid_pre_med/g0*1e3);
+fprintf('    гироскоп     : %7.3f / %7.3f °/ч\n', ...
+        mc.bg_true_pre_med/deg*3600, mc.bg_resid_pre_med/deg*3600);
+fprintf('%s\n', repmat('-',1,54));
+fprintf('  ПЕРЕД ТЕРМИНАЛЬНЫМ КОАСТОМ (t = %.1f с):\n', mc.t_coast_start);
+fprintf('    горизонтальная ошибка     : %8.3f м\n',    mc.pre_horiz_med);
+fprintf('    |dv|                      : %8.4f м/с\n',  mc.pre_dv_med);
+fprintf('    |dpsi|                    : %8.3f мрад\n', mc.pre_dpsi_med);
+fprintf('%s\n', repmat('=',1,54));
 
-% --- Фактически разыгранные аномалии гравитационного поля ---
+% --- Фактически разыгранные аномалии гравитационного поля (B2) ---
 if isfield(mc,'dg_info') && ~isempty(mc.dg_info)
     defl_tot = [mc.dg_info.defl_total_arcsec]';
-    defl_E   = [mc.dg_info.defl_E_arcsec]';
-    defl_N   = [mc.dg_info.defl_N_arcsec]';
     anom_v   = [mc.dg_info.anom_vert_mgal]';
     dg_h     = [mc.dg_info.dg_horiz_mps2]';
-    dg_n     = [mc.dg_info.dg_norm_mps2]';
-    fprintf('%s\n', repmat('-',1,54));
-    fprintf('  РАЗЫГРАННАЯ АНОМАЛИЯ ПОЛЯ (задано: откл. отвеса %.1f", аном. %.0f мГал)\n', ...
+    fprintf('\n  РАЗЫГРАННАЯ АНОМАЛИЯ ПОЛЯ (задано %.1f", %.0f мГал):\n', ...
             cfg.defl_vert_sigma*206265, cfg.grav_anom_sigma*1e5);
-    fprintf('    уклонение отвеса, полное : медиана %6.2f", СКО %6.2f", макс %6.2f"\n', ...
+    fprintf('    уклонение отвеса : медиана %.2f", СКО %.2f", макс %.2f"\n', ...
             median(defl_tot), std(defl_tot), max(defl_tot));
-    fprintf('      по Востоку             : среднее %+6.2f", СКО %6.2f"\n', ...
-            mean(defl_E), std(defl_E));
-    fprintf('      по Северу              : среднее %+6.2f", СКО %6.2f"\n', ...
-            mean(defl_N), std(defl_N));
-    fprintf('    аномалия вертикали       : среднее %+7.2f мГал, СКО %6.2f мГал\n', ...
+    fprintf('    аномалия вертик. : среднее %+.2f мГал, СКО %.2f мГал\n', ...
             mean(anom_v), std(anom_v));
-    fprintf('    |dg| горизонтальная      : медиана %.3e м/с²\n', median(dg_h));
-    fprintf('    |dg| полная              : медиана %.3e м/с²\n', median(dg_n));
-    fprintf('    ожидаемый вклад за коаст : %.2f м (0.5*|dg_гор|*T^2, T=%.0f с)\n', ...
+    fprintf('    |dg| гориз.      : медиана %.3e м/с²\n', median(dg_h));
+    fprintf('    ожидаемый вклад  : %.2f м за коаст %.0f с\n', ...
             0.5*median(dg_h)*p.coast_duration^2, p.coast_duration);
 end
-fprintf('%s\n', repmat('=',1,54));
 
 plot_montecarlo_cep(mc, cep_target);
 save('falco_step9_mc.mat', 'mc', 'cfg', 'prof', 'N_mc', 'base_seed');
 fprintf('\nсохранено: falco_step9_mc.mat\n');
+
+
+function s = ternary_str(cond, a, b)
+%TERNARY_STR  Выбор строки по условию.
+    if cond, s = a; else, s = b; end
+end
+
+
+function v = get_or(s, name, default)
+%GET_OR  Чтение поля структуры со значением по умолчанию.
+    if isfield(s, name), v = s.(name); else, v = default; end
+end

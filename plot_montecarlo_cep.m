@@ -86,23 +86,53 @@ function plot_montecarlo_cep(mc, cep_target)
     title(ax,'Сходимость оценки КВО (пунктир — ожидаемая точность медианы)','FontWeight','bold');
 
     % =====================================================================
-    % ФИГУРА 4: качество оценки bias акселерометра
+    % ФИГУРА 4: качество оценки bias ПЕРЕД ТЕРМИНАЛЬНЫМ КОАСТОМ
     % =====================================================================
-    figure('Color','w','Position',[180 180 950 430]);
+    % По осям: X — модуль ИСТИННОГО ПОЛНОГО смещения (turn-on + in-run + VRC),
+    %          Y — модуль остатка оценки |b_true - b_est|.
+    % Точки НИЖЕ диагонали означают, что фильтр уменьшил ошибку смещения;
+    % выше — что оценка хуже, чем просто принять bias нулевым.
+    %
+    % Процент "сколько выучено" сознательно НЕ строится: при малом истинном
+    % смещении отношение неустойчиво и даёт бессмысленные значения.
+    figure('Color','w','Position',[180 180 1000 460]);
+    deg = pi/180;
 
+    % --- Акселерометр ---
     ax = subplot(1,2,1); hold(ax,'on'); grid(ax,'on'); box(ax,'on');
-    scatter(ax, mc.ba_true/g0*1e3, mc.ba_resid/g0*1e3, 26, [0.2 0.6 0.35], 'filled', ...
-            'MarkerFaceAlpha',0.5);
-    xlabel(ax,'Истинный turn-on bias, мг'); ylabel(ax,'Остаточная ошибка оценки, мг');
-    title(ax,'Качество оценки bias акселерометра','FontWeight','bold');
+    if isfield(mc,'ba_true_pre')
+        xa = vecnorm(mc.ba_true_pre, 2, 2)/g0*1e3;      % мг
+        ya = mc.ba_resid_pre/g0*1e3;                    % мг
+        good = isfinite(xa) & isfinite(ya);
+        scatter(ax, xa(good), ya(good), 30, [0.2 0.6 0.35], 'filled', ...
+                'MarkerFaceAlpha',0.55);
+        lim = [0, max([xa(good); ya(good); eps])*1.05];
+        plot(ax, lim, lim, 'k--', 'LineWidth',1.2);
+        xlim(ax, lim); ylim(ax, lim);
+        xlabel(ax,'|истинное полное смещение|, мг');
+        ylabel(ax,'|остаток оценки|, мг');
+        title(ax, sprintf('Акселерометр (медианы %.3f / %.3f мг)', ...
+              median(xa(good)), median(ya(good))), 'FontWeight','bold');
+        legend(ax, {'реализации','y = x (оценка бесполезна)'}, 'Location','best');
+    end
 
+    % --- Гироскоп ---
     ax = subplot(1,2,2); hold(ax,'on'); grid(ax,'on'); box(ax,'on');
-    frac = 100*(1 - mc.ba_resid./mc.ba_true);
-    histogram(ax, frac, max(10,round(sqrt(numel(frac)))), 'FaceColor',[0.2 0.6 0.35], ...
-              'EdgeColor','w');
-    xline(ax, median(frac), 'r--', 'LineWidth',2, 'Label',sprintf('медиана %.1f%%',median(frac)));
-    xlabel(ax,'Доля оценённого bias, %'); ylabel(ax,'Число прогонов');
-    title(ax,'Насколько фильтр "выучил" bias','FontWeight','bold');
+    if isfield(mc,'bg_true_pre')
+        xg = vecnorm(mc.bg_true_pre, 2, 2)/deg*3600;    % °/ч
+        yg = mc.bg_resid_pre/deg*3600;                  % °/ч
+        good = isfinite(xg) & isfinite(yg);
+        scatter(ax, xg(good), yg(good), 30, [0.75 0.35 0.15], 'filled', ...
+                'MarkerFaceAlpha',0.55);
+        lim = [0, max([xg(good); yg(good); eps])*1.05];
+        plot(ax, lim, lim, 'k--', 'LineWidth',1.2);
+        xlim(ax, lim); ylim(ax, lim);
+        xlabel(ax,'|истинное полное смещение|, °/ч');
+        ylabel(ax,'|остаток оценки|, °/ч');
+        title(ax, sprintf('Гироскоп (медианы %.3f / %.3f °/ч)', ...
+              median(xg(good)), median(yg(good))), 'FontWeight','bold');
+        legend(ax, {'реализации','y = x (оценка бесполезна)'}, 'Location','best');
+    end
 end
 
 

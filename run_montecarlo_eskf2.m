@@ -47,8 +47,19 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     err_horiz  = zeros(N_mc,1);
     err_3d     = zeros(N_mc,1);
     err_enu    = zeros(N_mc,3);
-    ba_resid   = zeros(N_mc,1);
-    ba_true    = zeros(N_mc,1);
+    % КАЧЕСТВО ОЦЕНКИ BIAS — строго в момент ПЕРЕД терминальным коастом.
+    % Сравнивается оценка фильтра с ПОЛНЫМ истинным смещением в тот же
+    % момент: turn-on + текущая in-run составляющая (+ VRC, который фильтр
+    % от bias не отличает). Сравнение с одним лишь turn-on некорректно:
+    % у гироскопа Pulse-40 in-run bias РАВЕН калиброванному turn-on,
+    % отчего метрика "сколько выучено" давала -536%.
+    ba_true_pre  = nan(N_mc,3);   ba_est_pre  = nan(N_mc,3);
+    bg_true_pre  = nan(N_mc,3);   bg_est_pre  = nan(N_mc,3);
+    ba_resid_pre = nan(N_mc,1);   bg_resid_pre = nan(N_mc,1);
+    % Состояние непосредственно перед терминальным коастом
+    pre_horiz  = nan(N_mc,1);
+    pre_dv     = nan(N_mc,1);
+    pre_dpsi   = nan(N_mc,1);
     align_used = zeros(N_mc,3);
     n_fail     = 0;
 
@@ -57,6 +68,15 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
                      'defl_total_arcsec',[], 'anom_vert_mgal',[], ...
                      'dg_horiz_mps2',[], 'dg_norm_mps2',[]);
     dg_vec  = zeros(N_mc,3);
+
+    % Начало терминального коаста: второе окно аутэйджа. Метрики "перед
+    % коастом" берутся там, где фильтр в последний раз имел GNSS —
+    % это разделяет вклад активного участка и бесспутникового.
+    if size(cfg.outage,1) >= 2
+        t_coast_start = cfg.outage(2,1);
+    else
+        t_coast_start = truth.t(end);
+    end
 
     for i = 1:N_mc
         seed_i = base_seed + i;
@@ -86,21 +106,45 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
         if ~isfinite(res.err_horiz_final) || res.err_horiz_final > 1e5
             n_fail = n_fail + 1;
             err_horiz(i) = NaN;  err_3d(i) = NaN;  err_enu(i,:) = NaN;
-            ba_resid(i)  = NaN;
+            ba_resid_pre(i) = NaN;
+            bg_resid_pre(i) = NaN;
         else
             err_horiz(i) = res.err_horiz_final;
             err_3d(i)    = res.err_3d_final;
             err_enu(i,:) = res.dr_enu(end,:);
-            ba_resid(i)  = norm(e_imu.accel_turnon_bias - res.nav.ba);
+            % Строго ПОСЛЕДНЯЯ диагностическая точка ДО начала аутэйджа
+            k_pre = find(res.t < t_coast_start, 1, 'last');
+            if isempty(k_pre), k_pre = 1; end
+
+            pre_horiz(i) = hypot(res.dr_ned(k_pre,1), res.dr_ned(k_pre,2));
+            pre_dv(i)    = norm(res.dv(k_pre,:));
+            pre_dpsi(i)  = norm(res.dpsi(k_pre,:)) * 1e3;   % мрад
+
+            % Истинное ПОЛНОЕ смещение в тот же момент: берётся из истории,
+            % сохранённой add_imu_errors, а не пересчитывается заново.
+            [~, k_truth] = min(abs(imu_meas.t - res.t(k_pre)));
+            bg_true_pre(i,:) = imu_meas.bg_total(k_truth,:);
+            ba_true_pre(i,:) = imu_meas.ba_total(k_truth,:);
+            bg_est_pre(i,:)  = res.bg_est(k_pre,:);
+            ba_est_pre(i,:)  = res.ba_est(k_pre,:);
+
+            bg_resid_pre(i) = norm(bg_true_pre(i,:) - bg_est_pre(i,:));
+            ba_resid_pre(i) = norm(ba_true_pre(i,:) - ba_est_pre(i,:));
         end
-        ba_true(i)      = norm(e_imu.accel_turnon_bias);
+
         align_used(i,:) = cfg_i.align_err';
     end
 
     % --- Статистика ---
     ok = ~isnan(err_horiz);
     mc.err_horiz  = err_horiz;    mc.err_3d  = err_3d;    mc.err_enu = err_enu;
-    mc.ba_resid   = ba_resid;     mc.ba_true = ba_true;   mc.align_used = align_used;
+    mc.align_used = align_used;
+    % Качество оценки bias перед коастом (векторы и остатки)
+    mc.ba_true_pre  = ba_true_pre;    mc.ba_est_pre  = ba_est_pre;
+    mc.bg_true_pre  = bg_true_pre;    mc.bg_est_pre  = bg_est_pre;
+    mc.ba_resid_pre = ba_resid_pre;   mc.bg_resid_pre = bg_resid_pre;
+    mc.pre_horiz  = pre_horiz;    mc.pre_dv  = pre_dv;    mc.pre_dpsi = pre_dpsi;
+    mc.t_coast_start = t_coast_start;
     mc.n_fail     = n_fail;       mc.N_mc    = N_mc;
     mc.prof_name  = prof_truth.name;
 
@@ -121,10 +165,17 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     mc.dg_vec  = dg_vec;
     mc.grav_seed_offset = GRAV_SEED_OFFSET;
 
-    ok_b = ~isnan(ba_resid) & (ba_true > 0);
-    if any(ok_b)
-        mc.ba_frac_est = 1 - median(ba_resid(ok_b)./ba_true(ok_b));
-    else
-        mc.ba_frac_est = NaN;
-    end
+    % Медианы метрик перед коастом
+    mc.pre_horiz_med = median(pre_horiz(~isnan(pre_horiz)));
+    mc.pre_dv_med    = median(pre_dv(~isnan(pre_dv)));
+    mc.pre_dpsi_med  = median(pre_dpsi(~isnan(pre_dpsi)));
+
+    % Медианы истинного смещения и остатка оценки перед коастом.
+    % ПРОЦЕНТ "сколько выучено" СОЗНАТЕЛЬНО НЕ считается: при малом
+    % истинном смещении отношение неустойчиво и даёт бессмысленные
+    % значения. Смотреть следует на пару (истинное, остаток).
+    mc.bg_true_pre_med  = median(vecnorm(bg_true_pre(~isnan(bg_resid_pre),:),2,2));
+    mc.ba_true_pre_med  = median(vecnorm(ba_true_pre(~isnan(ba_resid_pre),:),2,2));
+    mc.bg_resid_pre_med = median(bg_resid_pre(~isnan(bg_resid_pre)));
+    mc.ba_resid_pre_med = median(ba_resid_pre(~isnan(ba_resid_pre)));
 end
