@@ -114,10 +114,51 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     n_gnss_max = ceil((truth.t(end) - truth.t(1)) * cfg.f_gnss) + 2;
     g_t     = zeros(n_gnss_max,1);
     g_innov = zeros(n_gnss_max,6);
+    % Диагностика временного сдвига (B4)
+    g_t_meas   = zeros(n_gnss_max,1);   % момент, к которому относится измерение
+    g_age      = zeros(n_gnss_max,1);   % возраст измерения t_nav - t_meas
+    g_mismatch = zeros(n_gnss_max,3);   % r_ant_true(t_meas) - r_ant_true(t_nav)
     ig = 0;
 
     t_next_gnss = truth.t(1);
     dt_gnss     = 1/cfg.f_gnss;
+
+    % =====================================================================
+    % Шаг 5.11.4b: ВРЕМЕННОЙ СДВИГ GNSS (B4)
+    % =====================================================================
+    % Моделируется НЕКОМПЕНСИРОВАННАЯ задержка измерения:
+    %     t_meas = t_nav - cfg.gnss_time_offset
+    % Измерение синтезируется по истине в момент t_meas, а коррекция фильтра
+    % выполняется в текущий момент t_nav — предсказание, H и update остаются
+    % привязанными к t_nav. Именно в этом и состоит эффект рассинхронизации.
+    %
+    % Сдвиг реализуется ЦЕЛОЧИСЛЕННЫМ смещением индекса сетки истины.
+    % Интерполяция сознательно не применяется: при типовых сдвигах
+    % 0.5..10 мс и сетке 2000 Гц (шаг 0.5 мс) все значения кратны шагу,
+    % а погрешность интерполяции при 0.5 мс могла бы превысить сам
+    % измеряемый эффект. Некратный сдвиг прерывается assert-ом.
+    if isfield(cfg,'gnss_time_offset_enable') && cfg.gnss_time_offset_enable
+        gnss_dt_off = cfg.gnss_time_offset;
+    else
+        gnss_dt_off = 0.0;
+    end
+
+    % Знак: измерение может быть только УСТАРЕВШИМ, не из будущего
+    assert(gnss_dt_off >= 0, 'eskf_run:negativeGnssOffset', ...
+        ['cfg.gnss_time_offset = %.6g с < 0. Отрицательный сдвиг означал бы\n' ...
+         'измерение из будущего, что физически невозможно.'], gnss_dt_off);
+
+    n_shift_raw = gnss_dt_off / truth.dt;
+    n_shift     = round(n_shift_raw);
+
+    % Кратность шагу сетки истины
+    assert(abs(n_shift_raw - n_shift) <= 1e-9 * max(1, n_shift_raw), ...
+        'eskf_run:gnssOffsetNotCommensurate', ...
+        ['cfg.gnss_time_offset = %.6g с НЕ КРАТЕН шагу сетки истины %.6g с.\n' ...
+         'Отношение = %.9f, ближайшее целое = %d.\n' ...
+         'Дробный сдвиг потребовал бы интерполяции (для Ceb — slerp),\n' ...
+         'что на данном этапе не реализовано.'], ...
+        gnss_dt_off, truth.dt, n_shift_raw, n_shift);
 
     % =====================================================================
     % Шаг 5.11.5: ГЛАВНЫЙ ЦИКЛ
@@ -140,16 +181,28 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
         % --- (3) GNSS UPDATE (если пришло время И нет аутэйджа) ---
         gnss_used = false;
         if tk >= t_next_gnss
-            if gnss_available(tk, cfg.outage)
+            % Индекс сетки истины, к которому относится измерение.
+            % При n_shift = 0 совпадает с b (идеальная синхронизация).
+            b_meas = b - n_shift;
+
+            % Измерение доступно только если сдвинутый момент лежит внутри
+            % траектории. В первые миллисекунды полёта это не так —
+            % обновление ПРОПУСКАЕТСЯ (индекс не зажимается, иначе возник бы
+            % фиктивный сдвиг, отличный от заданного).
+            if gnss_available(tk, cfg.outage) && b_meas >= 1
                 % ---- ИСТИННЫЕ позиция и скорость АНТЕННЫ ----
                 % Измерение и предсказание ОБЯЗАНЫ относиться к одной
                 % физической точке. Раньше измерение строилось в точке IMU,
                 % а предсказание — в точке антенны, что давало систематику
                 % порядка |lever| (наблюдалось 0.155 м при |lever| = 0.141 м).
-                C_true_b   = imu_meas.Ceb(:,:,b);          % истинная ориентация
-                w_eb_true  = imu_meas.w_eb_b(b,:)';        % истинная w отн. ECEF
-                r_ant_true = truth.R(b,:)' + C_true_b * cfg.lever;
-                v_ant_true = truth.V(b,:)' ...
+                % ВСЯ ЧЕТВЁРКА берётся СОГЛАСОВАННО в момент t_meas (индекс
+                % b_meas). Сдвигать только R/V, оставив Ceb в t_nav, нельзя:
+                % это внесло бы искусственную ошибку ~|w x l|*dt, которой в
+                % действительности нет.
+                C_true_b   = imu_meas.Ceb(:,:,b_meas);     % истинная ориентация
+                w_eb_true  = imu_meas.w_eb_b(b_meas,:)';   % истинная w отн. ECEF
+                r_ant_true = truth.R(b_meas,:)' + C_true_b * cfg.lever;
+                v_ant_true = truth.V(b_meas,:)' ...
                              + C_true_b * cross(w_eb_true, cfg.lever);
 
                 % Синтез измерения GNSS: истина АНТЕННЫ + шум
@@ -180,6 +233,16 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
                 ig = ig + 1;
                 g_t(ig)       = tk;
                 g_innov(ig,:) = z';
+
+                % --- Диагностика временного сдвига (B4) ---
+                g_t_meas(ig) = truth.t(b_meas);
+                g_age(ig)    = tk - truth.t(b_meas);
+                % Рассогласование истины: где антенна БЫЛА в t_meas против
+                % того, где она находится в t_nav. Это чистый геометрический
+                % эффект задержки, не зависящий от работы фильтра.
+                C_true_now      = imu_meas.Ceb(:,:,b);
+                r_ant_true_now  = truth.R(b,:)' + C_true_now * cfg.lever;
+                g_mismatch(ig,:) = (r_ant_true - r_ant_true_now)';
             end
             t_next_gnss = t_next_gnss + dt_gnss;
         end
@@ -221,6 +284,13 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     res.gnss_t     = g_t(gidx);
     res.gnss_innov = g_innov(gidx,:);
     res.n_gnss     = ig;
+
+    % --- Диагностика временного сдвига GNSS (B4) ---
+    res.gnss_t_meas    = g_t_meas(gidx);      % момент измерения
+    res.gnss_time_age  = g_age(gidx);         % возраст измерения [с]
+    res.gnss_mismatch  = g_mismatch(gidx,:);  % r_ant(t_meas) - r_ant(t_nav)
+    res.gnss_offset    = gnss_dt_off;         % заданный сдвиг [с]
+    res.gnss_n_shift   = n_shift;             % сдвиг в отсчётах сетки
 
     res.nav    = nav;
     res.P      = kf.P;
