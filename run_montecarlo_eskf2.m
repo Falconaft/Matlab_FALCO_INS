@@ -61,6 +61,9 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     pre_dv     = nan(N_mc,1);
     pre_dpsi   = nan(N_mc,1);
     align_used = zeros(N_mc,3);
+    % Применённые начальные ошибки (диагностика)
+    init_pos_used = zeros(N_mc,3);
+    init_vel_used = zeros(N_mc,3);
     n_fail     = 0;
 
     % Диагностика фактически разыгранных аномалий поля
@@ -89,6 +92,22 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
         % --- Ошибка выставки (своя на каждой реализации) ---
         cfg_i = cfg;
         cfg_i.align_err = cfg.align_sigma(:) .* randn(rng_imu, 3, 1);
+
+        % НАЧАЛЬНАЯ ОШИБКА ПОЗИЦИИ И СКОРОСТИ (предстартовое усреднение GNSS).
+        % Разыгрывается из ТОГО ЖЕ потока rng_imu сразу после выставки, чтобы
+        % последовательность оставалась воспроизводимой при фиксированном
+        % base_seed. Каждая реализация получает свою начальную ошибку.
+        % При отсутствии полей в cfg ошибка нулевая (идеальный старт).
+        if isfield(cfg,'init_pos_sigma')
+            cfg_i.init_pos_err = cfg.init_pos_sigma(:) .* randn(rng_imu, 3, 1);
+        else
+            cfg_i.init_pos_err = zeros(3,1);
+        end
+        if isfield(cfg,'init_vel_sigma')
+            cfg_i.init_vel_err = cfg.init_vel_sigma(:) .* randn(rng_imu, 3, 1);
+        else
+            cfg_i.init_vel_err = zeros(3,1);
+        end
         cfg_i.seed      = seed_i;
 
         % Аномалия гравитации: своя на каждой реализации (иначе она стала бы
@@ -132,13 +151,17 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
             ba_resid_pre(i) = norm(ba_true_pre(i,:) - ba_est_pre(i,:));
         end
 
-        align_used(i,:) = cfg_i.align_err';
+        align_used(i,:)     = cfg_i.align_err';
+        init_pos_used(i,:)  = cfg_i.init_pos_err';
+        init_vel_used(i,:)  = cfg_i.init_vel_err';
     end
 
     % --- Статистика ---
     ok = ~isnan(err_horiz);
     mc.err_horiz  = err_horiz;    mc.err_3d  = err_3d;    mc.err_enu = err_enu;
-    mc.align_used = align_used;
+    mc.align_used     = align_used;
+    mc.init_pos_used  = init_pos_used;
+    mc.init_vel_used  = init_vel_used;
     % Качество оценки bias перед коастом (векторы и остатки)
     mc.ba_true_pre  = ba_true_pre;    mc.ba_est_pre  = ba_est_pre;
     mc.bg_true_pre  = bg_true_pre;    mc.bg_est_pre  = bg_est_pre;

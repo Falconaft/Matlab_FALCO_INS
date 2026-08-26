@@ -23,6 +23,10 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
 %     c        - константы
 %     prof     - профиль IMU (для Qc и начальной ковариации)
 %     cfg      - конфигурация прогона (см. main_step5.m)
+%                опционально .init_pos_err / .init_vel_err (3x1) — начальная
+%                ошибка позиции/скорости навигатора. При отсутствии полей
+%                инициализация ИДЕАЛЬНАЯ (нулевые ошибки), что сохраняет
+%                поведение детерминированных тестов.
 %   Выход:
 %     res      - структура результатов и диагностики
 
@@ -52,8 +56,31 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     % C_true = (I + [dpsi x]) * C_hat  =>  C_hat = (I - [dpsi x]) * C_true
     C_hat0  = (eye(3) - skew(cfg.align_err)) * C_true0;
 
-    nav.r  = truth.R(1,:)';
-    nav.v  = truth.V(1,:)';
+    % =====================================================================
+    % НАЧАЛЬНАЯ ОШИБКА ПОЗИЦИИ И СКОРОСТИ
+    % =====================================================================
+    % Физически это результат предстартового усреднения решения GNSS на
+    % неподвижном изделии: позиция и скорость известны не точно, а с
+    % остаточной погрешностью. Прежде навигатор стартовал ТОЧНО из истины,
+    % что занижало ошибку на начальном участке.
+    %
+    % ОБРАТНАЯ СОВМЕСТИМОСТЬ: при отсутствии полей ошибки нулевые, то есть
+    % инициализация остаётся идеальной. Это сохраняет поведение
+    % детерминированных тестов (numerical floor, gravity anomaly,
+    % gnss time offset), которые этих полей не задают.
+    if isfield(cfg, 'init_pos_err')
+        init_pos_err = cfg.init_pos_err(:);
+    else
+        init_pos_err = zeros(3,1);
+    end
+    if isfield(cfg, 'init_vel_err')
+        init_vel_err = cfg.init_vel_err(:);
+    else
+        init_vel_err = zeros(3,1);
+    end
+
+    nav.r  = truth.R(1,:)' - init_pos_err;  % Знак "-" выбран специально для соответствия принятой конвенции ESKF. 
+    nav.v  = truth.V(1,:)' - init_vel_err;
     nav.q  = C2q(C_hat0);
     nav.C  = q2C(nav.q);
     nav.bg = zeros(3,1);
@@ -290,6 +317,8 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     res.gnss_time_age  = g_age(gidx);         % возраст измерения [с]
     res.gnss_mismatch  = g_mismatch(gidx,:);  % r_ant(t_meas) - r_ant(t_nav)
     res.gnss_offset    = gnss_dt_off;         % заданный сдвиг [с]
+    res.init_pos_err   = init_pos_err;        % применённая начальная ошибка
+    res.init_vel_err   = init_vel_err;
     res.gnss_n_shift   = n_shift;             % сдвиг в отсчётах сетки
 
     res.nav    = nav;
