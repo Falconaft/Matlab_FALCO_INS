@@ -134,6 +134,11 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     d_sba  = zeros(n_diag,3);   d_sbg   = zeros(n_diag,3);
     % Абсолютная навигационная траектория (не ошибка, а само решение)
     d_rnav = zeros(n_diag,3);   d_vnav  = zeros(n_diag,3);
+    % NEES по позиции и скорости (усечённый, 6 состояний).
+    % Полный NEES по 21 состоянию потребовал бы истинных ошибок bias и scale,
+    % которые здесь недоступны; усечённый вариант использует только dr и dv,
+    % а для них истина известна точно.
+    d_nees6 = zeros(n_diag,1);
     id = 0;
 
     % ОТДЕЛЬНЫЙ лог невязок GNSS (пишется В МОМЕНТ обновления, не по прореживанию!)
@@ -142,6 +147,7 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     g_t     = zeros(n_gnss_max,1);
     g_innov = zeros(n_gnss_max,6);
     % Диагностика временного сдвига (B4)
+    g_nis      = zeros(n_gnss_max,1);   % NIS = z'·S^-1·z (состоятельность)
     g_t_meas   = zeros(n_gnss_max,1);   % момент, к которому относится измерение
     g_age      = zeros(n_gnss_max,1);   % возраст измерения t_nav - t_meas
     g_mismatch = zeros(n_gnss_max,3);   % r_ant_true(t_meas) - r_ant_true(t_nav)
@@ -252,6 +258,13 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
                 [H, R] = eskf_H_gnss(cfg.sigma_pos, cfg.sigma_vel, true, ...
                                      nav.C, aux.w_b, cfg.lever, c);
                 kf = eskf_update(kf, z, H, R);
+
+                % NIS — нормированный квадрат невязки. Для состоятельного
+                % фильтра E[NIS] = dim(z) = 6. Значения СИСТЕМАТИЧЕСКИ выше
+                % означают, что фильтр ПЕРЕУВЕРЕН: реальные невязки больше,
+                % чем он ожидает по своей ковариации.
+                nis_k = z' * (kf.S \ z);
+
                 [kf, nav] = eskf_feedback(kf, nav);
 
                 gnss_used = true;
@@ -260,6 +273,7 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
                 ig = ig + 1;
                 g_t(ig)       = tk;
                 g_innov(ig,:) = z';
+                g_nis(ig)     = nis_k;
 
                 % --- Диагностика временного сдвига (B4) ---
                 g_t_meas(ig) = truth.t(b_meas);
@@ -288,6 +302,15 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
             d_sbg(id,:) = sP(10:12)';  d_sba(id,:) = sP(13:15)';
             % Абсолютное навигационное решение в ECEF
             d_rnav(id,:) = nav.r';     d_vnav(id,:) = nav.v';
+
+            % NEES по блоку позиция/скорость: dx' · P^-1 · dx, где dx —
+            % ИСТИННАЯ ошибка состояния (истина минус оценка, конвенция Sola).
+            % Для состоятельного фильтра E[NEES6] = 6.
+            % P берётся ДО следующего предсказания, согласованно с dx.
+            dx6   = [truth.R(b,:)' - nav.r; truth.V(b,:)' - nav.v];
+            P6    = kf.P(1:6,1:6);
+            P6    = (P6 + P6')/2;                 % симметризация
+            d_nees6(id) = dx6' * (P6 \ dx6);
         end
     end
 
@@ -306,6 +329,13 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     res.r_nav  = d_rnav(idx,:);
     res.v_nav  = d_vnav(idx,:);
 
+    % --- Метрики состоятельности фильтра ---
+    % NEES6: E = 6 для состоятельного фильтра. Больше -> переуверен.
+    % NIS:   E = 6 (размерность измерения GNSS). Больше -> переуверен.
+    res.nees6      = d_nees6(idx);
+    res.nees6_dim  = 6;
+    res.nis_dim    = 6;
+
     % Невязки GNSS - в отдельных полях со своей временной шкалой
     gidx           = 1:ig;
     res.gnss_t     = g_t(gidx);
@@ -313,6 +343,7 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     res.n_gnss     = ig;
 
     % --- Диагностика временного сдвига GNSS (B4) ---
+    res.gnss_nis       = g_nis(gidx);         % NIS по каждому обновлению
     res.gnss_t_meas    = g_t_meas(gidx);      % момент измерения
     res.gnss_time_age  = g_age(gidx);         % возраст измерения [с]
     res.gnss_mismatch  = g_mismatch(gidx,:);  % r_ant(t_meas) - r_ant(t_nav)

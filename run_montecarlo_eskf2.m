@@ -56,6 +56,31 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     ba_true_pre  = nan(N_mc,3);   ba_est_pre  = nan(N_mc,3);
     bg_true_pre  = nan(N_mc,3);   bg_est_pre  = nan(N_mc,3);
     ba_resid_pre = nan(N_mc,1);   bg_resid_pre = nan(N_mc,1);
+    % МЕТРИКИ СОСТОЯТЕЛЬНОСТИ ФИЛЬТРА (NEES / NIS).
+    % Для СОГЛАСОВАННОГО фильтра среднее обеих метрик равно размерности:
+    %   NEES6 (позиция+скорость) -> 6
+    %   NIS   (измерение GNSS)   -> 6
+    % Систематическое превышение означает ПЕРЕУВЕРЕННОСТЬ: реальные ошибки
+    % больше, чем фильтр ожидает по своей ковариации. Это ожидаемо, поскольку
+    % в модели истины есть источники, которых нет в состоянии фильтра
+    % (перекос осей, g-sens, B2, B4).
+    % ХРАНИМ ПОЛНЫЕ ВРЕМЕННЫЕ РЯДЫ, а не усреднённые по времени скаляры.
+    % Причина: отсчёты NEES/NIS ВНУТРИ одной реализации КОРРЕЛИРОВАНЫ
+    % (состояние фильтра меняется плавно), поэтому их среднее по времени
+    % НЕЛЬЗЯ трактовать как выборку независимых chi-квадрат величин.
+    % Корректная статистика — ANEES/ANIS: усреднение по АНСАМБЛЮ при
+    % ФИКСИРОВАННОМ времени, где реализации независимы по построению.
+    NEES_mat = [];              % (N_mc x n_diag)  заполняется по первой реализации
+    NIS_mat  = [];              % (N_mc x n_gnss)
+    t_diag   = [];              % общая диагностическая сетка
+    t_gnss   = [];              % общая сетка обновлений GNSS
+
+    % Усреднённые по времени величины — ТОЛЬКО как компактная сводка.
+    % Строгим 95% тестом они НЕ являются (см. выше про корреляцию).
+    nees_gnss  = nan(N_mc,1);
+    nees_coast = nan(N_mc,1);
+    nis_tavg   = nan(N_mc,1);
+
     % Состояние непосредственно перед терминальным коастом
     pre_horiz  = nan(N_mc,1);
     pre_dv     = nan(N_mc,1);
@@ -135,6 +160,35 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
             k_pre = find(res.t < t_coast_start, 1, 'last');
             if isempty(k_pre), k_pre = 1; end
 
+            % --- Метрики состоятельности: СОХРАНЯЕМ РЯДЫ ---
+            if isfield(res,'nees6')
+                if isempty(NEES_mat)
+                    t_diag   = res.t(:)';
+                    NEES_mat = nan(N_mc, numel(t_diag));
+                end
+                % Все реализации идут по одной траектории с одним diag_decim,
+                % поэтому сетка совпадает. Проверка на случай расхождения.
+                if numel(res.nees6) == size(NEES_mat,2)
+                    NEES_mat(i,:) = res.nees6(:)';
+                end
+
+                % Компактная сводка по участкам (НЕ строгий тест)
+                i_coast = res.t >= t_coast_start;
+                i_gnss  = ~i_coast & (res.t > cfg.outage(1,2));
+                if any(i_gnss),  nees_gnss(i)  = mean(res.nees6(i_gnss),  'omitnan'); end
+                if any(i_coast), nees_coast(i) = mean(res.nees6(i_coast), 'omitnan'); end
+            end
+            if isfield(res,'gnss_nis') && ~isempty(res.gnss_nis)
+                if isempty(NIS_mat)
+                    t_gnss  = res.gnss_t(:)';
+                    NIS_mat = nan(N_mc, numel(t_gnss));
+                end
+                if numel(res.gnss_nis) == size(NIS_mat,2)
+                    NIS_mat(i,:) = res.gnss_nis(:)';
+                end
+                nis_tavg(i) = mean(res.gnss_nis, 'omitnan');
+            end
+
             pre_horiz(i) = hypot(res.dr_ned(k_pre,1), res.dr_ned(k_pre,2));
             pre_dv(i)    = norm(res.dv(k_pre,:));
             pre_dpsi(i)  = norm(res.dpsi(k_pre,:)) * 1e3;   % мрад
@@ -189,6 +243,70 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     mc.grav_seed_offset = GRAV_SEED_OFFSET;
 
     % Медианы метрик перед коастом
+    % =====================================================================
+    % СТАТИСТИКА СОСТОЯТЕЛЬНОСТИ: ANEES / ANIS
+    % =====================================================================
+    % ANEES(k) = среднее NEES по ансамблю в МОМЕНТ t(k).
+    % Реализации независимы, поэтому при согласованном фильтре
+    %       sum_i NEES_i(k) ~ chi2(N*dim)
+    % и доверительный коридор для ANEES(k):
+    %       [ chi2(0.025, N*dim)/N , chi2(0.975, N*dim)/N ]
+    % Квантили — аппроксимация Уилсона-Хилферти (без Statistics Toolbox).
+    %
+    % Так усреднение идёт ПОПЕРЁК независимых реализаций, а не вдоль
+    % коррелированного времени, поэтому тест корректен.
+    dim = 6;
+    mc.consist_dim = dim;
+
+    if ~isempty(NEES_mat)
+        n_ok_k = sum(~isnan(NEES_mat), 1);              % реализаций в каждый момент
+        mc.anees   = mean(NEES_mat, 1, 'omitnan');      % ANEES(t)
+        mc.anees_t = t_diag;
+        mc.anees_n = n_ok_k;
+        % Коридор строится по фактическому числу реализаций в момент k
+        mc.anees_lo = nan(size(mc.anees));
+        mc.anees_hi = nan(size(mc.anees));
+        for k = 1:numel(mc.anees)
+            nk = n_ok_k(k);
+            if nk > 0
+                [lo, hi] = chi2_bounds_wh(nk*dim, 0.95);
+                mc.anees_lo(k) = lo/nk;
+                mc.anees_hi(k) = hi/nk;
+            end
+        end
+        mc.NEES_mat = NEES_mat;
+        % Типичное число реализаций в момент времени (для подписи графика)
+        mc.consist_n_typ = median(n_ok_k(n_ok_k > 0));
+    end
+
+    if ~isempty(NIS_mat)
+        n_ok_g = sum(~isnan(NIS_mat), 1);
+        mc.anis   = mean(NIS_mat, 1, 'omitnan');        % ANIS(t)
+        mc.anis_t = t_gnss;
+        mc.anis_n = n_ok_g;
+        mc.anis_lo = nan(size(mc.anis));
+        mc.anis_hi = nan(size(mc.anis));
+        for k = 1:numel(mc.anis)
+            nk = n_ok_g(k);
+            if nk > 0
+                [lo, hi] = chi2_bounds_wh(nk*dim, 0.95);
+                mc.anis_lo(k) = lo/nk;
+                mc.anis_hi(k) = hi/nk;
+            end
+        end
+        mc.NIS_mat = NIS_mat;
+    end
+
+    % Компактные средние по времени. ВНИМАНИЕ: это НЕ строгий 95% тест,
+    % поскольку отсчёты внутри реализации коррелированы. Служат только
+    % грубым индикатором уровня.
+    mc.nees_gnss  = nees_gnss;
+    mc.nees_coast = nees_coast;
+    mc.nis_tavg   = nis_tavg;
+    mc.nees_gnss_mean  = mean(nees_gnss(~isnan(nees_gnss)));
+    mc.nees_coast_mean = mean(nees_coast(~isnan(nees_coast)));
+    mc.nis_tavg_mean   = mean(nis_tavg(~isnan(nis_tavg)));
+
     mc.pre_horiz_med = median(pre_horiz(~isnan(pre_horiz)));
     mc.pre_dv_med    = median(pre_dv(~isnan(pre_dv)));
     mc.pre_dpsi_med  = median(pre_dpsi(~isnan(pre_dpsi)));
@@ -201,4 +319,30 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     mc.ba_true_pre_med  = median(vecnorm(ba_true_pre(~isnan(ba_resid_pre),:),2,2));
     mc.bg_resid_pre_med = median(bg_resid_pre(~isnan(bg_resid_pre)));
     mc.ba_resid_pre_med = median(ba_resid_pre(~isnan(ba_resid_pre)));
+end
+
+
+function [lo, hi] = chi2_bounds_wh(k, conf)
+%CHI2_BOUNDS_WH  Квантили распределения хи-квадрат без Statistics Toolbox.
+%
+%   Аппроксимация Уилсона-Хилферти:
+%       chi2_p(k) ~ k * (1 - 2/(9k) + z_p*sqrt(2/(9k)))^3
+%   где z_p — квантиль стандартного нормального распределения.
+%
+%   Точность при k >= 30 лучше 0.1%, что для наших k = N*6 >= 60 избыточно.
+%   Использована вместо chi2inv, поскольку Statistics Toolbox может
+%   отсутствовать.
+%
+%   Вход:  k    - число степеней свободы
+%          conf - доверительная вероятность (например 0.95)
+%   Выход: lo, hi - нижняя и верхняя границы
+
+    alpha = 1 - conf;
+    % Квантили нормального распределения для двустороннего интервала.
+    % Для conf = 0.95 это ±1.959964; для прочих значений используется
+    % обратная функция ошибок (входит в базовый MATLAB).
+    z = sqrt(2) * erfinv(1 - alpha);
+
+    lo = k * (1 - 2/(9*k) - z*sqrt(2/(9*k)))^3;
+    hi = k * (1 - 2/(9*k) + z*sqrt(2/(9*k)))^3;
 end

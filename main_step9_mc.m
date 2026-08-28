@@ -159,6 +159,33 @@ fprintf('  ПЕРЕД ТЕРМИНАЛЬНЫМ КОАСТОМ (t = %.1f с):\n',
 fprintf('    горизонтальная ошибка     : %8.3f м\n',    mc.pre_horiz_med);
 fprintf('    |dv|                      : %8.4f м/с\n',  mc.pre_dv_med);
 fprintf('    |dpsi|                    : %8.3f мрад\n', mc.pre_dpsi_med);
+fprintf('%s\n', repmat('-',1,54));
+
+% =====================================================================
+% СОСТОЯТЕЛЬНОСТЬ ФИЛЬТРА
+% =====================================================================
+% СТРОГИЙ ТЕСТ — это ANEES/ANIS: усреднение по АНСАМБЛЮ при фиксированном
+% времени, где реализации независимы. Он на графике plot_consistency.
+%
+% Ниже приведены средние ПО ВРЕМЕНИ внутри реализаций. Они удобны как
+% компактный индикатор уровня, но СТРОГИМ 95% ТЕСТОМ НЕ ЯВЛЯЮТСЯ:
+% отсчёты внутри реализации коррелированы, поэтому chi-квадрат коридор
+% к ним неприменим.
+if isfield(mc,'nees_gnss_mean')
+    fprintf('  СОСТОЯТЕЛЬНОСТЬ, средние по времени (идеал = %d):\n', mc.consist_dim);
+    fprintf('    NEES6 в окне GNSS         : %8.2f\n', mc.nees_gnss_mean);
+    fprintf('    NEES6 на коасте           : %8.2f\n', mc.nees_coast_mean);
+    fprintf('    NIS  в окне GNSS          : %8.2f\n', mc.nis_tavg_mean);
+    fprintf('    (строгий тест — ANEES/ANIS на графике состоятельности)\n');
+end
+if isfield(mc,'anees')
+    frac_hi = 100*mean(mc.anees > mc.anees_hi, 'omitnan');
+    fprintf('    ANEES выше коридора 95%%   : %7.1f %% времени\n', frac_hi);
+end
+if isfield(mc,'anis')
+    frac_hi = 100*mean(mc.anis > mc.anis_hi, 'omitnan');
+    fprintf('    ANIS  выше коридора 95%%   : %7.1f %% обновлений\n', frac_hi);
+end
 fprintf('%s\n', repmat('=',1,54));
 
 % --- Фактически разыгранные аномалии гравитационного поля (B2) ---
@@ -178,6 +205,7 @@ if isfield(mc,'dg_info') && ~isempty(mc.dg_info)
 end
 
 plot_montecarlo_cep(mc, cep_target);
+plot_consistency(mc, p, cfg);
 save('falco_step9_mc.mat', 'mc', 'cfg', 'prof', 'N_mc', 'base_seed');
 fprintf('\nсохранено: falco_step9_mc.mat\n');
 
@@ -192,3 +220,5 @@ function v = get_or(s, name, default)
 %GET_OR  Чтение поля структуры со значением по умолчанию.
     if isfield(s, name), v = s.(name); else, v = default; end
 end
+
+
