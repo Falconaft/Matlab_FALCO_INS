@@ -47,11 +47,11 @@ function plot_error_budget(budget)
     xline(ax, cepb, 'r--', 'LineWidth',2, 'Label',sprintf('база %.2f м',cepb));
     set(ax, 'YTick', 1:n, 'YTickLabel', budget.names, 'YDir','reverse');
     xlabel(ax, 'КВО при отключённом источнике, м');
-    title(ax, 'Чего можно достичь, устранив источник','FontWeight','bold');
+    title(ax, 'КВО при отключении каждого источника','FontWeight','bold');
 
     for i = 1:n
-        text(ax, budget.cep_off(i)+0.02*cepb, i, ...
-             sprintf('%.2f  (-%.2f)', budget.cep_off(i), budget.drop(i)), ...
-             'VerticalAlignment','middle', 'FontSize',8);
+    text(ax, budget.cep_off(i)+0.02*cepb, i, ...
+         sprintf('%.2f', budget.cep_off(i)), ...
+         'VerticalAlignment','middle', 'FontSize',8);
     end
 end
