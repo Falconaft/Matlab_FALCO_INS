@@ -71,7 +71,11 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     % Корректная статистика — ANEES/ANIS: усреднение по АНСАМБЛЮ при
     % ФИКСИРОВАННОМ времени, где реализации независимы по построению.
     NEES_mat = [];              % (N_mc x n_diag)  заполняется по первой реализации
+    NEESR_mat= [];              % (N_mc x n_diag)  только позиция, dim = 3
+    NEESV_mat= [];              % (N_mc x n_diag)  только скорость, dim = 3
     NIS_mat  = [];              % (N_mc x n_gnss)
+    RHOP_mat = [];              % (N_mc x n_gnss)  rho по каналу ПОЗИЦИИ
+    RHOV_mat = [];              % (N_mc x n_gnss)  rho по каналу СКОРОСТИ
     t_diag   = [];              % общая диагностическая сетка
     t_gnss   = [];              % общая сетка обновлений GNSS
 
@@ -171,6 +175,17 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
                 if numel(res.nees6) == size(NEES_mat,2)
                     NEES_mat(i,:) = res.nees6(:)';
                 end
+                % Раздельные каналы
+                if isfield(res,'nees_r')
+                    if isempty(NEESR_mat)
+                        NEESR_mat = nan(N_mc, numel(t_diag));
+                        NEESV_mat = nan(N_mc, numel(t_diag));
+                    end
+                    if numel(res.nees_r) == size(NEESR_mat,2)
+                        NEESR_mat(i,:) = res.nees_r(:)';
+                        NEESV_mat(i,:) = res.nees_v(:)';
+                    end
+                end
 
                 % Компактная сводка по участкам (НЕ строгий тест)
                 i_coast = res.t >= t_coast_start;
@@ -185,6 +200,21 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
                 end
                 if numel(res.gnss_nis) == size(NIS_mat,2)
                     NIS_mat(i,:) = res.gnss_nis(:)';
+                end
+                % Отношение вкладов P и R в инновационную ковариацию:
+                % усредняем по шести компонентам измерения
+                % Каналы позиции и скорости хранятся РАЗДЕЛЬНО: масштабы R
+                % у них различаются на два порядка, смешивать нельзя.
+                % Внутри канала три компоненты усредняются — они однородны.
+                if isfield(res,'gnss_rho_pos')
+                    if isempty(RHOP_mat)
+                        RHOP_mat = nan(N_mc, numel(t_gnss));
+                        RHOV_mat = nan(N_mc, numel(t_gnss));
+                    end
+                    if size(res.gnss_rho_pos,1) == size(RHOP_mat,2)
+                        RHOP_mat(i,:) = mean(res.gnss_rho_pos, 2)';
+                        RHOV_mat(i,:) = mean(res.gnss_rho_vel, 2)';
+                    end
                 end
                 nis_tavg(i) = mean(res.gnss_nis, 'omitnan');
             end
@@ -279,6 +309,31 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
         mc.consist_n_typ = median(n_ok_k(n_ok_k > 0));
     end
 
+    % --- ANEES по каналам, dim = 3 ---
+    dim3 = 3;
+    if ~isempty(NEESR_mat)
+        for tag = {'r','v'}
+            t_ = tag{1};
+            if strcmp(t_,'r'), M = NEESR_mat; else, M = NEESV_mat; end
+            n_ok_c = sum(~isnan(M), 1);
+            a  = mean(M, 1, 'omitnan');
+            lo_ = nan(size(a));  hi_ = nan(size(a));
+            for k = 1:numel(a)
+                nk = n_ok_c(k);
+                if nk > 0
+                    [l, h] = chi2_bounds_wh(nk*dim3, 0.95);
+                    lo_(k) = l/nk;  hi_(k) = h/nk;
+                end
+            end
+            mc.(['anees_' t_])      = a;
+            mc.(['anees_' t_ '_lo']) = lo_;
+            mc.(['anees_' t_ '_hi']) = hi_;
+        end
+        mc.anees_rv_dim = dim3;
+        mc.NEESR_mat = NEESR_mat;
+        mc.NEESV_mat = NEESV_mat;
+    end
+
     if ~isempty(NIS_mat)
         n_ok_g = sum(~isnan(NIS_mat), 1);
         mc.anis   = mean(NIS_mat, 1, 'omitnan');        % ANIS(t)
@@ -295,6 +350,20 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
             end
         end
         mc.NIS_mat = NIS_mat;
+    end
+
+    % --- Доминирование R в инновационной ковариации, ПО КАНАЛАМ ---
+    % rho = diag(H·P_prior·H') / diag(R), извлечено из той же S, что
+    % использует NIS. При rho << 1 величина S определяется шумом R,
+    % и NIS теряет чувствительность к заниженности P.
+    if ~isempty(RHOP_mat)
+        mc.rho_pos     = mean(RHOP_mat, 1, 'omitnan');
+        mc.rho_vel     = mean(RHOV_mat, 1, 'omitnan');
+        mc.rho_t       = t_gnss;
+        mc.rho_pos_med = median(mc.rho_pos(isfinite(mc.rho_pos)));
+        mc.rho_vel_med = median(mc.rho_vel(isfinite(mc.rho_vel)));
+        mc.RHOP_mat    = RHOP_mat;
+        mc.RHOV_mat    = RHOV_mat;
     end
 
     % Компактные средние по времени. ВНИМАНИЕ: это НЕ строгий 95% тест,

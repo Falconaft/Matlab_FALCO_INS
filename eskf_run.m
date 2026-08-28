@@ -139,6 +139,11 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     % которые здесь недоступны; усечённый вариант использует только dr и dv,
     % а для них истина известна точно.
     d_nees6 = zeros(n_diag,1);
+    % РАЗДЕЛЬНЫЕ NEES по позиции и скорости (dim = 3 каждый).
+    % Полный NEES6 смешивает два канала; раздельные показывают, в каком
+    % именно из них фильтр переуверен — это разные физические причины.
+    d_neesr = zeros(n_diag,1);
+    d_neesv = zeros(n_diag,1);
     id = 0;
 
     % ОТДЕЛЬНЫЙ лог невязок GNSS (пишется В МОМЕНТ обновления, не по прореживанию!)
@@ -148,6 +153,13 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     g_innov = zeros(n_gnss_max,6);
     % Диагностика временного сдвига (B4)
     g_nis      = zeros(n_gnss_max,1);   % NIS = z'·S^-1·z (состоятельность)
+    % Отношение diag(H·P·H') / diag(R) по каждому обновлению.
+    % Проверяет, насколько шум измерений доминирует в инновационной
+    % ковариации S = H·P·H' + R. При отношении << 1 величина S почти
+    % целиком определяется R, и NIS теряет чувствительность к
+    % заниженности P.
+    g_rho_pos  = zeros(n_gnss_max,3);   % компоненты 1:3 (позиция)
+    g_rho_vel  = zeros(n_gnss_max,3);   % компоненты 4:6 (скорость)
     g_t_meas   = zeros(n_gnss_max,1);   % момент, к которому относится измерение
     g_age      = zeros(n_gnss_max,1);   % возраст измерения t_nav - t_meas
     g_mismatch = zeros(n_gnss_max,3);   % r_ant_true(t_meas) - r_ant_true(t_nav)
@@ -265,6 +277,16 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
                 % чем он ожидает по своей ковариации.
                 nis_k = z' * (kf.S \ z);
 
+                % Вклад P против вклада R в ИННОВАЦИОННОЙ ковариации.
+                % ИСПРАВЛЕНО: раньше бралось diag(H*kf.P*H') ПОСЛЕ
+                % eskf_update, то есть по АПОСТЕРИОРНОЙ P, тогда как NIS
+                % использует S = H*P_prior*H' + R. Матрицы были разные, и
+                % отношение не соответствовало тому, что видит NIS.
+                % Теперь H*P_prior*H' извлекается из той же S: S - R.
+                HPH_diag = diag(kf.S) - diag(R);
+                R_diag   = diag(R);
+                rho_k    = (HPH_diag ./ max(R_diag, eps))';
+
                 [kf, nav] = eskf_feedback(kf, nav);
 
                 gnss_used = true;
@@ -274,6 +296,12 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
                 g_t(ig)       = tk;
                 g_innov(ig,:) = z';
                 g_nis(ig)     = nis_k;
+                % Каналы НЕ смешиваются: масштабы R по позиции (м) и по
+                % скорости (м/с) различаются на два порядка, поэтому
+                % усреднение шести компонент в одно число скрывало бы
+                % картину.
+                g_rho_pos(ig,:) = rho_k(1:3);
+                g_rho_vel(ig,:) = rho_k(4:6);
 
                 % --- Диагностика временного сдвига (B4) ---
                 g_t_meas(ig) = truth.t(b_meas);
@@ -307,10 +335,20 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
             % ИСТИННАЯ ошибка состояния (истина минус оценка, конвенция Sola).
             % Для состоятельного фильтра E[NEES6] = 6.
             % P берётся ДО следующего предсказания, согласованно с dx.
-            dx6   = [truth.R(b,:)' - nav.r; truth.V(b,:)' - nav.v];
+            dr_true = truth.R(b,:)' - nav.r;
+            dv_true = truth.V(b,:)' - nav.v;
+            dx6   = [dr_true; dv_true];
             P6    = kf.P(1:6,1:6);
             P6    = (P6 + P6')/2;                 % симметризация
             d_nees6(id) = dx6' * (P6 \ dx6);
+
+            % Раздельно по каналам: берутся ДИАГОНАЛЬНЫЕ блоки Prr и Pvv.
+            % Кросс-корреляция позиция-скорость при этом отбрасывается,
+            % поэтому сумма NEES_r + NEES_v в общем случае НЕ равна NEES6.
+            Prr = kf.P(1:3,1:3);   Prr = (Prr + Prr')/2;
+            Pvv = kf.P(4:6,4:6);   Pvv = (Pvv + Pvv')/2;
+            d_neesr(id) = dr_true' * (Prr \ dr_true);
+            d_neesv(id) = dv_true' * (Pvv \ dv_true);
         end
     end
 
@@ -334,6 +372,9 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     % NIS:   E = 6 (размерность измерения GNSS). Больше -> переуверен.
     res.nees6      = d_nees6(idx);
     res.nees6_dim  = 6;
+    res.nees_r     = d_neesr(idx);      % dim = 3
+    res.nees_v     = d_neesv(idx);      % dim = 3
+    res.nees_rv_dim= 3;
     res.nis_dim    = 6;
 
     % Невязки GNSS - в отдельных полях со своей временной шкалой
@@ -344,6 +385,8 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
 
     % --- Диагностика временного сдвига GNSS (B4) ---
     res.gnss_nis       = g_nis(gidx);         % NIS по каждому обновлению
+    res.gnss_rho_pos   = g_rho_pos(gidx,:);   % diag(HPH')/diag(R), позиция
+    res.gnss_rho_vel   = g_rho_vel(gidx,:);   % то же, скорость
     res.gnss_t_meas    = g_t_meas(gidx);      % момент измерения
     res.gnss_time_age  = g_age(gidx);         % возраст измерения [с]
     res.gnss_mismatch  = g_mismatch(gidx,:);  % r_ant(t_meas) - r_ant(t_nav)
