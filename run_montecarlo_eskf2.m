@@ -85,6 +85,21 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     nees_coast = nan(N_mc,1);
     nis_tavg   = nan(N_mc,1);
 
+    % МАСШТАБНЫЕ КОЭФФИЦИЕНТЫ: истина и оценка в ДВУХ точках —
+    % перед отключением GNSS и в конце сценария. Две точки нужны потому,
+    % что на коасте состояние scale уже не корректируется (нет измерений),
+    % и разница между точками показывает, сохраняется ли оценка.
+    % Смещение гироскопа: полная истина и оценка в двух точках, ПО ОСЯМ.
+    % Осевая разбивка нужна потому, что возбуждение по осям различается
+    % на порядки, и сводная норма скрывает, какая ось портит результат.
+    bg_true_pre_ax = nan(N_mc,3);   bg_est_pre_ax = nan(N_mc,3);
+    bg_true_end_ax = nan(N_mc,3);   bg_est_end_ax = nan(N_mc,3);
+    rho_pre_ax     = nan(N_mc,3);   % корреляция δbg<->δsg перед коастом
+
+    sg_true_all = nan(N_mc,3);   sa_true_all = nan(N_mc,3);
+    sg_pre      = nan(N_mc,3);   sa_pre      = nan(N_mc,3);
+    sg_end      = nan(N_mc,3);   sa_end      = nan(N_mc,3);
+
     % Состояние непосредственно перед терминальным коастом
     pre_horiz  = nan(N_mc,1);
     pre_dv     = nan(N_mc,1);
@@ -217,6 +232,27 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
                     end
                 end
                 nis_tavg(i) = mean(res.gnss_nis, 'omitnan');
+            end
+
+            % --- Смещение гироскопа по осям в двух точках ---
+            if isfield(res,'bg_true')
+                bg_true_pre_ax(i,:) = res.bg_true(k_pre,:);
+                bg_est_pre_ax(i,:)  = res.bg_est(k_pre,:);
+                bg_true_end_ax(i,:) = res.bg_true(end,:);
+                bg_est_end_ax(i,:)  = res.bg_est(end,:);
+            end
+            if isfield(res,'rho_bg_sg')
+                rho_pre_ax(i,:) = res.rho_bg_sg(k_pre,:);
+            end
+
+            % --- Масштабные коэффициенты в двух точках ---
+            if isfield(res,'sg_est')
+                sg_true_all(i,:) = e_imu.gyro_scale(:)';
+                sa_true_all(i,:) = e_imu.accel_scale(:)';
+                sg_pre(i,:) = res.sg_est(k_pre,:);
+                sa_pre(i,:) = res.sa_est(k_pre,:);
+                sg_end(i,:) = res.sg_est(end,:);
+                sa_end(i,:) = res.sa_est(end,:);
             end
 
             pre_horiz(i) = hypot(res.dr_ned(k_pre,1), res.dr_ned(k_pre,2));
@@ -375,6 +411,31 @@ function mc = run_montecarlo_eskf2(prof_truth, prof_filter, imu_ideal, truth, c,
     mc.nees_gnss_mean  = mean(nees_gnss(~isnan(nees_gnss)));
     mc.nees_coast_mean = mean(nees_coast(~isnan(nees_coast)));
     mc.nis_tavg_mean   = mean(nis_tavg(~isnan(nis_tavg)));
+
+    % --- Метрики оценки смещения гироскопа (в °/ч) ---
+    DPH = 180/pi*3600;
+    if any(isfinite(bg_true_pre_ax(:)))
+        mc.gb.pre = estimation_quality_metrics(bg_true_pre_ax, bg_est_pre_ax, DPH);
+        mc.gb.end = estimation_quality_metrics(bg_true_end_ax, bg_est_end_ax, DPH);
+        mc.gb.rho_pre_med = median(rho_pre_ax, 1, 'omitnan');
+        mc.gb.bg_true_pre = bg_true_pre_ax;   mc.gb.bg_est_pre = bg_est_pre_ax;
+        mc.gb.bg_true_end = bg_true_end_ax;   mc.gb.bg_est_end = bg_est_end_ax;
+        mc.gb.rho_pre     = rho_pre_ax;
+    end
+
+    % --- Метрики оценки масштабных коэффициентов ---
+    % Расчёт вынесен в scale_factor_metrics, чтобы не дублировать формулы
+    % между кампаниями и одиночными прогонами.
+    if any(isfinite(sg_true_all(:)))
+        mc.sf.gyro_pre  = scale_factor_metrics(sg_true_all, sg_pre);
+        mc.sf.gyro_end  = scale_factor_metrics(sg_true_all, sg_end);
+        mc.sf.accel_pre = scale_factor_metrics(sa_true_all, sa_pre);
+        mc.sf.accel_end = scale_factor_metrics(sa_true_all, sa_end);
+        % Сырые данные — на случай внешнего анализа
+        mc.sf.sg_true = sg_true_all;   mc.sf.sa_true = sa_true_all;
+        mc.sf.sg_pre  = sg_pre;        mc.sf.sa_pre  = sa_pre;
+        mc.sf.sg_end  = sg_end;        mc.sf.sa_end  = sa_end;
+    end
 
     mc.pre_horiz_med = median(pre_horiz(~isnan(pre_horiz)));
     mc.pre_dv_med    = median(pre_dv(~isnan(pre_dv)));

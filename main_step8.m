@@ -151,6 +151,15 @@ fprintf('Истинный bias акс.: %s мг\n', mat2str(e_imu.accel_turnon_b
 fprintf('Оценено: %.1f%%\n', ...
         100*(1 - norm(e_imu.accel_turnon_bias - res.nav.ba)/norm(e_imu.accel_turnon_bias)));
 
+% --- Масштабные коэффициенты: оценка против истины ---
+m_g = scale_factor_metrics(e_imu.gyro_scale',  res.sg_est(end,:));
+m_a = scale_factor_metrics(e_imu.accel_scale', res.sa_est(end,:));
+fprintf('\nМАСШТАБНЫЕ КОЭФФИЦИЕНТЫ (ppm, на конец сценария):\n');
+fprintf('  гироскоп     истина %7.1f | остаток %7.1f | устранено %6.1f%%\n', ...
+        m_g.rms_true, m_g.rmse, m_g.eta);
+fprintf('  акселерометр истина %7.1f | остаток %7.1f | устранено %6.1f%%\n', ...
+        m_a.rms_true, m_a.rmse, m_a.eta);
+
 % =====================================================================
 % Шаг 8.4b: ПРОТОКОЛ BASELINE_250 (сводка для сравнения с 400 Гц)
 % =====================================================================
@@ -207,6 +216,13 @@ plot_eskf_results(res, truth, e_imu.accel_turnon_bias, e_imu.gyro_turnon_bias);
 
 % Сравнение истинной и навигационной траекторий (внешний NED-интерфейс)
 plot_nav_comparison(truth, res, p, cfg, c);
+
+% Диагностика оценки масштабных коэффициентов (+ панели возбуждения,
+% объясняющие наблюдаемость по каждой оси)
+plot_scale_diagnostics(res, truth, imu, e_imu, p, cfg);
+
+% Диагностика оценки смещения гироскопа (+ разделимость с масштабом)
+plot_gyro_bias_diagnostics(res, imu, p, cfg);
 
 save('falco_step8.mat', 'res', 'cfg', 'prof', 'baseline');
 fprintf('\nсохранено: falco_step8.mat (включая структуру baseline)\n');

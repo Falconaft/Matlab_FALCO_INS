@@ -111,6 +111,9 @@ function F = eskf_F_matrix(r_e, v_e, C_b_e, f_b, w_ib_b, c, corrtime, Gg, f_thre
     % =====================================================================
     F(ibg, ibg) = -1/corrtime * eye(3);
     F(iba, iba) = -1/corrtime * eye(3);
+    % F(ibg, ibg) = zeros(3);
+    % F(iba, iba) = zeros(3);
+
 
     % =====================================================================
     % Шаг 5.x.5: строки scale (RANDOM CONSTANT - случайная константа на полёт)

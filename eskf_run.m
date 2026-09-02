@@ -118,8 +118,44 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     kf.P(1:3,1:3)     = diag(cfg.P0_pos(:).^2);
     kf.P(4:6,4:6)     = diag(cfg.P0_vel(:).^2);
     kf.P(7:9,7:9)     = diag(cfg.P0_att(:).^2);
-    kf.P(10:12,10:12) = prof.gyro.turnon_bias_sigma^2  * eye(3);
-    kf.P(13:15,13:15) = prof.accel.turnon_bias_sigma^2 * eye(3);
+    % =====================================================================
+    % НАЧАЛЬНАЯ КОВАРИАЦИЯ СМЕЩЕНИЙ — СОГЛАСОВАНА С ИСТИНОЙ
+    % =====================================================================
+    % ИСПРАВЛЕНО. Прежде здесь стояло turnon_bias_sigma^2 БЕЗ учёта
+    % предпусковой калибровки, тогда как истина формирует смещение так:
+    %
+    %   imu_draw_errors : turnon = cal_factor * turnon_bias_sigma * randn
+    %   add_imu_errors  : b_inrun(0) = inrun_bias_sigma * randn
+    %   полное смещение : bg_total = turnon + b_inrun + vrc
+    %
+    % Фактическое стартовое СКО складывается из ДВУХ независимых частей:
+    %
+    %   sigma_b0 = sqrt( (cal_factor * turnon_bias_sigma)^2
+    %                    + inrun_bias_sigma^2 )
+    %
+    % Для гироскопа Pulse-40 это sqrt(0.495^2 + 0.5^2) = 0.704 °/ч на ось,
+    % тогда как в фильтр подставлялось 150 °/ч — завышение в 213 раз по СКО
+    % и в 45 000 раз по дисперсии. Настолько раздутая P0 давала фильтру
+    % «право» списывать на bias посторонние эффекты (остаток g-sens,
+    % перекос осей, ошибки масштаба), из-за чего оценка уходила на 3-4 °/ч
+    % по осям X и Z, где смещение почти не наблюдаемо.
+    %
+    % Та же ошибка была у акселерометра, но там завышение всего вчетверо,
+    % поэтому проявлялась она слабее.
+    %
+    % VRC в P0 НЕ включается: это не начальная неопределённость, а
+    % детерминированный отклик на вибрацию, действующий только при
+    % работающем двигателе.
+    cal_g = get_cal(prof, 'cal_factor_gyro');
+    cal_a = get_cal(prof, 'cal_factor_accel');
+
+    sig_bg0 = sqrt( (cal_g * prof.gyro.turnon_bias_sigma)^2 ...
+                    + prof.gyro.inrun_bias_sigma^2 );
+    sig_ba0 = sqrt( (cal_a * prof.accel.turnon_bias_sigma)^2 ...
+                    + prof.accel.inrun_bias_sigma^2 );
+
+    kf.P(10:12,10:12) = sig_bg0^2 * eye(3);
+    kf.P(13:15,13:15) = sig_ba0^2 * eye(3);
     kf.P(16:18,16:18) = prof.gyro.scale_factor_sigma^2  * eye(3);
     kf.P(19:21,19:21) = prof.accel.scale_factor_sigma^2 * eye(3);
 
@@ -132,6 +168,24 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     d_sr   = zeros(n_diag,3);   d_sv    = zeros(n_diag,3);   d_sp    = zeros(n_diag,3);
     d_ba   = zeros(n_diag,3);   d_bg    = zeros(n_diag,3);
     d_sba  = zeros(n_diag,3);   d_sbg   = zeros(n_diag,3);
+    % Оценки МАСШТАБНЫХ КОЭФФИЦИЕНТОВ и их СКО.
+    % В текущей модели scale — случайная константа (F = 0, Qc = 0), поэтому
+    % P по этим состояниям может только УБЫВАТЬ: рост неопределённости не
+    % предусмотрен. Диагностика показывает, насколько фильтр фактически
+    % использует эту возможность при имеющемся профиле возбуждения.
+    d_sg   = zeros(n_diag,3);   d_sa    = zeros(n_diag,3);
+    d_ssg  = zeros(n_diag,3);   d_ssa   = zeros(n_diag,3);
+    % ИСТИННОЕ ПОЛНОЕ смещение гироскопа (turn-on + in-run + VRC) — из
+    % служебной истории add_imu_errors. Нужно потому, что фильтр оценивает
+    % ПОЛНОЕ смещение, и сравнивать его только с turn-on некорректно:
+    % у Pulse-40 in-run bias равен калиброванному turn-on.
+    d_bgtr = zeros(n_diag,3);
+    % КОРРЕЛЯЦИЯ δbg_i <-> δsg_i по каждой оси.
+    % Модель измерения гироскопа: δω = δbg + diag(ω)·δsg. При слабо
+    % меняющейся ω состояния почти НЕРАЗДЕЛИМЫ: |rho| -> 1 означает, что
+    % фильтр не может развести их, и ошибка одного гасится другим.
+    % Это прямая мера разделимости, и она уже содержится в самой P.
+    d_rbgsg= zeros(n_diag,3);
     % Абсолютная навигационная траектория (не ошибка, а само решение)
     d_rnav = zeros(n_diag,3);   d_vnav  = zeros(n_diag,3);
     % NEES по позиции и скорости (усечённый, 6 состояний).
@@ -328,6 +382,24 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
             d_sr(id,:)  = sP(1:3)';    d_sv(id,:)  = sP(4:6)';    d_sp(id,:) = sP(7:9)';
             d_bg(id,:)  = nav.bg';     d_ba(id,:)  = nav.ba';
             d_sbg(id,:) = sP(10:12)';  d_sba(id,:) = sP(13:15)';
+            % Накопленная оценка scale после feedback/injection
+            d_sg(id,:)  = nav.sg';     d_sa(id,:)  = nav.sa';
+            d_ssg(id,:) = sP(16:18)';  d_ssa(id,:) = sP(19:21)';
+
+            % Истинное полное смещение гироскопа в этот момент
+            if isfield(imu_meas,'bg_total')
+                d_bgtr(id,:) = imu_meas.bg_total(b,:);
+            end
+
+            % Корреляция δbg_i <-> δsg_i: индексы состояний 9+i и 15+i
+            for iax = 1:3
+                ib  = 9  + iax;
+                isc = 15 + iax;
+                den = sqrt(kf.P(ib,ib) * kf.P(isc,isc));
+                if den > 0
+                    d_rbgsg(id,iax) = kf.P(ib,isc) / den;
+                end
+            end
             % Абсолютное навигационное решение в ECEF
             d_rnav(id,:) = nav.r';     d_vnav(id,:) = nav.v';
 
@@ -361,6 +433,12 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
     res.sig_r  = d_sr(idx,:);     res.sig_v = d_sv(idx,:);    res.sig_p = d_sp(idx,:);
     res.bg_est = d_bg(idx,:);     res.ba_est= d_ba(idx,:);
     res.sig_bg = d_sbg(idx,:);    res.sig_ba= d_sba(idx,:);
+    % Масштабные коэффициенты (безразмерные; в ppm умножать на 1e6)
+    res.sg_est = d_sg(idx,:);     res.sa_est = d_sa(idx,:);
+    res.sig_sg = d_ssg(idx,:);    res.sig_sa = d_ssa(idx,:);
+    % Диагностика смещения гироскопа
+    res.bg_true   = d_bgtr(idx,:);      % полное истинное смещение [рад/с]
+    res.rho_bg_sg = d_rbgsg(idx,:);     % корреляция δbg_i <-> δsg_i
 
     % Абсолютная навигационная траектория (ECEF). Логируется всегда:
     % нужна для построения truth vs nav и для внешнего NED-интерфейса.
@@ -433,5 +511,21 @@ function ok = gnss_available(tk, outage)
             ok = false;
             return;
         end
+    end
+end
+
+
+function k = get_cal(prof, name)
+%GET_CAL  Коэффициент остатка после предпусковой калибровки.
+%   Раздельные cal_factor_gyro / cal_factor_accel имеют приоритет над общим
+%   cal_factor; при отсутствии обоих принимается 1 (калибровки нет).
+%   Логика повторяет imu_draw_errors, чтобы P0 строилась по тем же данным,
+%   что и сама истина.
+    if isfield(prof, name)
+        k = prof.(name);
+    elseif isfield(prof, 'cal_factor')
+        k = prof.cal_factor;
+    else
+        k = 1.0;
     end
 end
