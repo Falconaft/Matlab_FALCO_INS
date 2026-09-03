@@ -38,6 +38,8 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
 
     if ~isfield(cfg,'lever')      || isempty(cfg.lever),      cfg.lever = zeros(3,1); end
     if ~isfield(cfg,'diag_decim') || isempty(cfg.diag_decim), cfg.diag_decim = 25;    end
+    if ~isfield(cfg,'q_model_factor') || isempty(cfg.q_model_factor), cfg.q_model_factor = 0; end
+    
     rng_gnss = RandStream('mt19937ar','Seed', cfg.seed);
 
     % Проверка наличия служебной истинной кинематики. Fallback на зашумлённый
@@ -273,7 +275,8 @@ function res = eskf_run(imu_meas, truth, c, prof, cfg)
         % --- (2) PREDICT: F -> PHI -> Qd -> P ---
         F   = eskf_F_matrix(nav.r, nav.v, nav.C, aux.f_b, aux.w_b, c, cfg.corrtime);
         PHI = eskf_discretize(F, dt, 2);
-        Qd  = eskf_Q_matrix(nav.C, PHI, dt, prof, cfg.corrtime);
+        % Qd  = eskf_Q_matrix(nav.C, PHI, dt, prof, cfg.corrtime);
+        Qd = eskf_Q_matrix(nav.C, PHI, dt, prof, cfg.corrtime, cfg.q_model_factor); 
         kf.P = PHI * kf.P * PHI' + Qd;
         kf.P = (kf.P + kf.P')/2;
 

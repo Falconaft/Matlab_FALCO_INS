@@ -1,4 +1,4 @@
-function [Qd, G, Qc] = eskf_Q_matrix(C_b_e, PHI, dt, prof, corrtime)
+function [Qd, G, Qc] = eskf_Q_matrix(C_b_e, PHI, dt, prof, corrtime, q_model_factor)
 %ESKF_Q_MATRIX  Дискретная ковариация шума процесса Qd для 21-состояния ESKF.
 %
 %   Строит непрерывную Qc (спектральные плотности шумов IMU), матрицу
@@ -32,10 +32,27 @@ function [Qd, G, Qc] = eskf_Q_matrix(C_b_e, PHI, dt, prof, corrtime)
 %     G  - матрица распределения шума (21x18)
 %     Qc - непрерывная матрица спектральных плотностей (18x18)
 
+    
+    Qc = zeros(18,18);
+    
+    if nargin < 6 || isempty(q_model_factor)
+    q_model_factor = 0;
+    end
+    assert(q_model_factor >= 0);
+    
+    % Физическая составляющая
+    q_acc_phys = prof.accel.vrw^2;
+    q_gyr_phys = prof.gyro.arw^2;
+    
+    % Дополнительная модельная неопределённость
+    q_acc_model = q_model_factor * q_acc_phys;
+    q_gyr_model = q_model_factor * q_gyr_phys;
+    
     % =====================================================================
     % Шаг 5.7.1: Непрерывная матрица спектральных плотностей Qc (18x18)
     % =====================================================================
-    Qc = zeros(18,18);
+    Qc(1:3,1:3) = (q_acc_phys + q_acc_model) * eye(3);
+    Qc(4:6,4:6) = (q_gyr_phys + q_gyr_model) * eye(3);
 
     % Белый шум датчиков (ARW/VRW уже в СИ: [м/с/√с], [рад/√с])
     Qc(1:3,   1:3)   = prof.accel.vrw^2 * eye(3);          % VRW² (акселерометр)

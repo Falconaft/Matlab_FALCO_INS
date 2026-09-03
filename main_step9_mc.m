@@ -5,10 +5,12 @@
 clear; clc; close all;
 load('falco_step7.mat', 'truth', 'imu', 'c', 'p');
 
+cfg.show_progress = true; % Включение progress-bar.
+
 % =====================================================================
 % Шаг 9.1: ПАРАМЕТРЫ КАМПАНИИ
 % =====================================================================
-N_mc       = 10;        % финальная кампания
+N_mc       = 100;        % финальная кампания
 base_seed  = 3001;
 cep_target = 10;
 
@@ -21,7 +23,7 @@ cfg = falco_config();
 % Частота записи диагностики задаётся ЯВНО в герцах, прореживание
 % вычисляется из неё. Раньше стояло число 250, привязанное к f_nav=250
 % (250 тактов = 1 с); при смене частоты навигатора смысл менялся бы молча.
-cfg.f_diag     = 1;                                   % [Гц]
+cfg.f_diag     = 10;                                   % [Гц]
 cfg.diag_decim = round(cfg.fnav / cfg.f_diag);   % пересчёт после смены f_diag
 cfg.cep_target = cep_target;
 
@@ -39,8 +41,8 @@ cfg.grav_anom_sigma = 50e-5;            % [м/с²] СКО аномалии (50 
 % БЕЗ аппаратной синхронизации по PPS. По парному МК (test_b2b4_paired_mc)
 % вклад составляет +0.75 м, то есть ~17% бюджета КВО; при 5 мс R95 уже
 % выходит за целевые 10 м.
-cfg.gnss_time_offset_enable = true;
-cfg.gnss_time_offset        = 2e-3;     % [с]
+cfg.gnss_time_offset_enable = false; % true or false.
+cfg.gnss_time_offset        = 0;     % 2e-3 [с]
 
 t_end         = truth.t(end);
 t_coast_start = t_end - p.coast_duration;

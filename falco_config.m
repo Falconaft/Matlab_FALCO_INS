@@ -85,4 +85,15 @@ function cfg = falco_config()
     % без изменений.
     cfg.gnss_time_offset_enable = false;
     cfg.gnss_time_offset        = 0.0;    % [с]
+
+    % Дополнительный model process noise.
+    % 0 = исходный физический Q IMU.
+    % 1 = добавить ещё 1x мощности ARW/VRW -> итоговые блоки 2x.
+    % 3 = добавить ещё 3x -> итоговые блоки 4x.
+    cfg.q_model_factor = 0.0;
+
+
+    % Параметр запуска параллельных вычислений. true/false 
+    cfg.use_parallel     = true;
+    
 end

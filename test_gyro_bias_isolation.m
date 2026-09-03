@@ -25,12 +25,12 @@ cfg.P0_vel      = [0.1;0.1;0.1];
 cfg.defl_vert_sigma = 10/206265;
 cfg.grav_anom_sigma = 50e-5;
 
-cfg.gnss_time_offset_enable = true;
-cfg.gnss_time_offset        = 2e-3;
+cfg.gnss_time_offset_enable = false;
+cfg.gnss_time_offset        = 0;
 
 prof_base = imu_profile_pulse40_updated();
 
-N_mc      = 5;
+N_mc      = 25;
 base_seed = 3001;
 
 %% --------------------------------------------------------------
